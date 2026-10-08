@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -39,6 +40,10 @@ func main() {
 		gate      = Thresholds{}
 		compare   = flag.Bool("compare", false, "compare two saved reports: adrian-eval -compare old.json new.json")
 		failRegr  = flag.Bool("fail-on-regression", false, "with -compare, exit 1 if the new report is worse")
+		priceIn   = flag.Float64("price-in", 0, "USD per million input tokens, for the cost estimate")
+		priceOut  = flag.Float64("price-out", 0, "USD per million output tokens, for the cost estimate")
+		priceHit  = flag.Float64("price-cached", 0, "USD per million cached input tokens (defaults to -price-in)")
+		promptDir = flag.String("prompt-dir", "", "folder holding system_prompt.md and few_shot.md, for the prompt fingerprint")
 	)
 	flag.Float64Var(&gate.MaxMissedBlocksPct, "max-missed-blocks", -1, "fail if missed blocks exceed this percent (off if negative)")
 	flag.Float64Var(&gate.MaxFalsePositivesPct, "max-false-positives", -1, "fail if false positives exceed this percent (off if negative)")
@@ -87,15 +92,46 @@ func main() {
 		os.Exit(2)
 	}
 
+	// Count tokens from every model response. The judge client uses the
+	// default transport, so wrapping it covers all of its calls.
+	meter := &usageMeter{base: http.DefaultTransport}
+	http.DefaultTransport = meter
+	prices := Prices{Input: *priceIn, CachedInput: *priceHit, Output: *priceOut}
+
 	judge := engine.NewHTTPClient(*url, *key, *model, nil, nil)
 	opt := Options{Concurrency: *workers, Retries: *retries, Backoff: *backoff}
+
+	started := time.Now()
+	reps := make([]Report, 0, *runs)
+	for i := 1; i <= *runs; i++ {
+		if *runs > 1 {
+			fmt.Fprintf(os.Stderr, "run %d of %d...\n", i, *runs)
+		}
+		before := meter.Snapshot()
+		report := Score(RunWith(context.Background(), judge, cases, opt))
+		used := meter.Snapshot().Sub(before).WithCost(prices)
+		report.Usage = &used
+		reps = append(reps, report)
+	}
+
+	commit, dirty := gitState()
+	casesSum, _ := fileSHA256(*casesPath)
+	meta := &Meta{
+		Tool: "adrian-eval", StartedAt: started.UTC().Format(time.RFC3339),
+		DurationSec: float64(time.Since(started).Milliseconds()) / 1000,
+		Model:       *model, Endpoint: cleanEndpoint(*url),
+		Runs: *runs, Concurrency: *workers, Retries: *retries,
+		CasesFile: *casesPath, CasesSHA256: casesSum, CaseCount: len(cases),
+		PromptSHA256: promptSHA256(*promptDir), GitCommit: commit, GitDirty: dirty,
+	}
 
 	// One run keeps the detailed report. Several runs print a summary of
 	// each, the averages, and the cases whose answer changed.
 	var output any
 	var verdict *GateResult
 	if *runs == 1 {
-		report := Score(RunWith(context.Background(), judge, cases, opt))
+		report := reps[0]
+		report.Meta = meta
 		report.Print(os.Stdout)
 		if !gate.Off() {
 			g := CheckGate(report.gateMetrics(), gate)
@@ -103,12 +139,10 @@ func main() {
 		}
 		output = report
 	} else {
-		reps := make([]Report, 0, *runs)
-		for i := 1; i <= *runs; i++ {
-			fmt.Fprintf(os.Stderr, "run %d of %d...\n", i, *runs)
-			reps = append(reps, Score(RunWith(context.Background(), judge, cases, opt)))
-		}
 		multi := Summarise(reps)
+		multi.Meta = meta
+		total := meter.Snapshot().WithCost(prices)
+		multi.Usage = &total
 		multi.Print(os.Stdout)
 		if !gate.Off() {
 			g := CheckGate(multi.gateMetrics(), gate)

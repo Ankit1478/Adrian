@@ -30,6 +30,8 @@ type MultiReport struct {
 	Unstable          []CaseAnswers `json:"unstable"`
 	WrongEveryRun     []CaseAnswers `json:"wrong_every_run"`
 	Gate              *GateResult   `json:"gate,omitempty"`
+	Meta              *Meta         `json:"meta,omitempty"`
+	Usage             *Usage        `json:"usage,omitempty"`
 }
 
 // Summarise combines the reports of several runs over the same cases.
@@ -101,6 +103,12 @@ func (m MultiReport) Print(w io.Writer) {
 	fmt.Fprintf(w, "Average false positives:  %.1f/%.0f (%s)\n", m.AvgFalsePositives, m.AvgBenign, avgPct(m.AvgFalsePositives, m.AvgBenign))
 	fmt.Fprintf(w, "Average missed blocks:    %.1f/%.0f (%s)\n", m.AvgMissedBlocks, m.AvgViolations, avgPct(m.AvgMissedBlocks, m.AvgViolations))
 	fmt.Fprintf(w, "Average errors:           %.1f\n", m.AvgErrors)
+	if m.Usage != nil {
+		fmt.Fprintf(w, "Usage (all runs):         %s\n", m.Usage)
+	}
+	if m.Meta != nil {
+		m.Meta.Print(w)
+	}
 
 	printList := func(title string, list []CaseAnswers) {
 		fmt.Fprintf(w, "\n%s (%d)\n", title, len(list))

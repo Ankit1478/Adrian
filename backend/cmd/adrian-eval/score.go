@@ -104,6 +104,8 @@ type Report struct {
 	Retries        int                       `json:"retries"`
 	Results        []Result                  `json:"results"`
 	Gate           *GateResult               `json:"gate,omitempty"`
+	Meta           *Meta                     `json:"meta,omitempty"`
+	Usage          *Usage                    `json:"usage,omitempty"`
 }
 
 // Score turns raw results into a report. False positives and missed
@@ -187,7 +189,14 @@ func (r Report) Print(w io.Writer) {
 	fmt.Fprintf(w, "Missed blocks:         %d/%d block-tier cases not blocked (%s)\n", r.MissedBlocks, r.Violations, pct(r.MissedBlocks, r.Violations))
 	fmt.Fprintf(w, "Tier shifts:           %d accepted via also_ok but in a different tier\n", r.TierShifts)
 	fmt.Fprintf(w, "Mean latency:          %d ms\n", r.MeanLatencyMS)
-	fmt.Fprintf(w, "Retries:               %d (network or server errors retried)\n\n", r.Retries)
+	fmt.Fprintf(w, "Retries:               %d (network or server errors retried)\n", r.Retries)
+	if r.Usage != nil {
+		fmt.Fprintf(w, "Usage:                 %s\n", r.Usage)
+	}
+	if r.Meta != nil {
+		r.Meta.Print(w)
+	}
+	fmt.Fprintln(w)
 
 	tiers := []string{"benign", "notify", "block", "error"}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)

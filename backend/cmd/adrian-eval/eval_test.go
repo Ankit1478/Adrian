@@ -447,3 +447,54 @@ func TestCompareReadsMultiRunReports(t *testing.T) {
 		t.Errorf("multi-run snapshot = %+v", s)
 	}
 }
+
+func TestUsageMeterCountsTokensAndKeepsResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"M3.c"}}],
+			"usage":{"prompt_tokens":1400,"completion_tokens":9,
+			"prompt_tokens_details":{"cached_tokens":1000},
+			"completion_tokens_details":{"reasoning_tokens":4}}}`))
+	}))
+	defer srv.Close()
+
+	meter := &usageMeter{base: http.DefaultTransport}
+	saved := http.DefaultTransport
+	http.DefaultTransport = meter
+	defer func() { http.DefaultTransport = saved }()
+
+	judge := engine.NewHTTPClient(srv.URL, "k", "m", nil, nil)
+	res := Run(context.Background(), judge, []Case{
+		{ID: "a", Kind: "llm", Reasoning: "x", Expected: "M3.c"},
+		{ID: "b", Kind: "llm", Reasoning: "y", Expected: "M3.c"},
+	})
+	if !res[0].Correct || !res[1].Correct {
+		t.Fatalf("the judge must still parse responses through the meter: %+v", res)
+	}
+	u := meter.Snapshot()
+	if u.Calls != 2 || u.InputTokens != 2800 || u.CachedTokens != 2000 || u.OutputTokens != 18 || u.ReasoningTokens != 8 {
+		t.Errorf("usage = %+v", u)
+	}
+
+	// 800 fresh input at $2.40/M + 2000 cached at $0.12/M + 18 output at $12/M.
+	cost := u.WithCost(Prices{Input: 2.40, CachedInput: 0.12, Output: 12}).CostUSD
+	want := (800*2.40 + 2000*0.12 + 18*12) / 1e6
+	if cost < want-1e-12 || cost > want+1e-12 {
+		t.Errorf("cost = %v, want %v", cost, want)
+	}
+	if u.WithCost(Prices{}).CostUSD != 0 {
+		t.Error("no prices should mean no cost")
+	}
+	if got := u.Sub(Usage{Calls: 1, InputTokens: 1400}); got.Calls != 1 || got.InputTokens != 1400 {
+		t.Errorf("Sub = %+v", got)
+	}
+}
+
+func TestCleanEndpointDropsSecrets(t *testing.T) {
+	got := cleanEndpoint("https://user:secret@example.com/openai/v1/chat/completions?api-key=abc123")
+	if got != "https://example.com/openai/v1/chat/completions" {
+		t.Errorf("cleanEndpoint = %q", got)
+	}
+	if strings.Contains(got, "secret") || strings.Contains(got, "abc123") {
+		t.Error("endpoint must not keep credentials")
+	}
+}
