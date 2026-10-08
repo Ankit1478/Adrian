@@ -364,3 +364,86 @@ func TestGateFailsWhenJudgeNeverAnswers(t *testing.T) {
 		t.Errorf("both block cases should count as missed: %+v", g.Checks)
 	}
 }
+
+// writeJSON saves v to a temp file and returns its path.
+func writeJSON(t *testing.T, v any) string {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := t.TempDir() + "/r.json"
+	if err := os.WriteFile(p, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestCompareFindsFixedBrokenAndRegression(t *testing.T) {
+	res := func(id, exp, got string, ok bool) Result {
+		return Result{ID: id, Expected: exp, Got: got, GotTier: tierOf(got), Correct: ok, TierCorrect: ok}
+	}
+	old := Score([]Result{
+		res("a", "M0", "M0", true),
+		res("b", "M3.c", "M0", false),  // will be fixed
+		res("c", "M3.a", "M3.a", true), // will break
+		res("gone", "M0", "M0", true),
+	})
+	cur := Score([]Result{
+		res("a", "M0", "M0", true),
+		res("b", "M3.c", "M3.c", true),
+		res("c", "M3.a", "M2.b", false),
+		res("new", "M0", "M0", true),
+	})
+	o, err := LoadSnapshot(writeJSON(t, old))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := LoadSnapshot(writeJSON(t, cur))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := Compare(o, n)
+	if len(c.Fixed) != 1 || c.Fixed[0].ID != "b" {
+		t.Errorf("Fixed = %+v, want b", c.Fixed)
+	}
+	if len(c.Broken) != 1 || c.Broken[0].ID != "c" || c.Broken[0].After != "M2.b" {
+		t.Errorf("Broken = %+v, want c -> M2.b", c.Broken)
+	}
+	if fmt.Sprint(c.OnlyOld, c.OnlyNew) != "[gone] [new]" {
+		t.Errorf("only-in-one = %v %v", c.OnlyOld, c.OnlyNew)
+	}
+	if !c.Regressed() {
+		t.Error("a broken case must count as a regression")
+	}
+	var out bytes.Buffer
+	c.Print(&out)
+	for _, want := range []string{"Fixed (wrong -> right) (1)", "Broken (right -> wrong) (1)", "Result: REGRESSION"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("compare output missing %q:\n%s", want, out.String())
+		}
+	}
+
+	// Comparing a report with itself is not a regression.
+	if Compare(n, n).Regressed() {
+		t.Error("identical reports must not regress")
+	}
+}
+
+func TestCompareReadsMultiRunReports(t *testing.T) {
+	run := func(gotB string, okB bool) Report {
+		return Score([]Result{
+			{ID: "a", Expected: "M0", Got: "M0", GotTier: "benign", Correct: true, TierCorrect: true},
+			{ID: "b", Expected: "M3.c", Got: gotB, GotTier: tierOf(gotB), Correct: okB, TierCorrect: okB},
+		})
+	}
+	// b is right in 2 of 3 runs, so it counts as correct overall.
+	m := Summarise([]Report{run("M3.c", true), run("M0", false), run("M3.c", true)})
+	s, err := LoadSnapshot(writeJSON(t, m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Runs != 3 || !s.Cases["b"].Correct || s.Cases["b"].Answer != "M3.c/M0/M3.c" {
+		t.Errorf("multi-run snapshot = %+v", s)
+	}
+}

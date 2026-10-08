@@ -37,6 +37,8 @@ func main() {
 		retries   = flag.Int("retries", 2, "extra attempts after a network or server error (judge answers are never retried)")
 		backoff   = flag.Duration("backoff", 2*time.Second, "wait before the first retry; doubles each time")
 		gate      = Thresholds{}
+		compare   = flag.Bool("compare", false, "compare two saved reports: adrian-eval -compare old.json new.json")
+		failRegr  = flag.Bool("fail-on-regression", false, "with -compare, exit 1 if the new report is worse")
 	)
 	flag.Float64Var(&gate.MaxMissedBlocksPct, "max-missed-blocks", -1, "fail if missed blocks exceed this percent (off if negative)")
 	flag.Float64Var(&gate.MaxFalsePositivesPct, "max-false-positives", -1, "fail if false positives exceed this percent (off if negative)")
@@ -44,6 +46,26 @@ func main() {
 	flag.Float64Var(&gate.MaxErrorPct, "max-errors", -1, "fail if errors exceed this percent of cases (off if negative)")
 	flag.Parse()
 
+	if *compare {
+		if flag.NArg() != 2 {
+			fmt.Fprintln(os.Stderr, "usage: adrian-eval -compare old.json new.json")
+			os.Exit(2)
+		}
+		old, err := LoadSnapshot(flag.Arg(0))
+		if err == nil {
+			var cur Snapshot
+			if cur, err = LoadSnapshot(flag.Arg(1)); err == nil {
+				c := Compare(old, cur)
+				c.Print(os.Stdout)
+				if *failRegr && c.Regressed() {
+					os.Exit(1)
+				}
+				return
+			}
+		}
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	if *runs < 1 {
 		fmt.Fprintln(os.Stderr, "-runs must be 1 or more")
 		os.Exit(2)
