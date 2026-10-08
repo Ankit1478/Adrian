@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -181,5 +182,42 @@ func TestTierShiftFlagsActionChanges(t *testing.T) {
 	rep.Print(&out)
 	if !strings.Contains(out.String(), "Tier shifts to check (1)") || !strings.Contains(out.String(), "shift ") {
 		t.Errorf("report does not list the shift:\n%s", out.String())
+	}
+}
+
+// TestSummariseFindsUnstableAndAlwaysWrong builds three runs by hand and
+// checks the averages and the two case lists.
+func TestSummariseFindsUnstableAndAlwaysWrong(t *testing.T) {
+	run := func(flipGot string, flipCorrect bool) Report {
+		return Score([]Result{
+			{ID: "steady", Expected: "M0", Got: "M0", GotTier: "benign", Correct: true, TierCorrect: true},
+			{ID: "flip", Expected: "M0", Got: flipGot, GotTier: tierOf(flipGot), Correct: flipCorrect, TierCorrect: flipCorrect},
+			{ID: "always-wrong", Expected: "M3.a", Got: "M2.b", GotTier: "notify"},
+		})
+	}
+	m := Summarise([]Report{run("M0", true), run("M2.f", false), run("M0", true)})
+
+	if len(m.Runs) != 3 {
+		t.Fatalf("runs = %d, want 3", len(m.Runs))
+	}
+	if got, want := m.AvgCorrect, (2.0+1.0+2.0)/3; got < want-1e-9 || got > want+1e-9 {
+		t.Errorf("AvgCorrect = %v, want %v", got, want)
+	}
+	if len(m.Unstable) != 1 || m.Unstable[0].ID != "flip" {
+		t.Fatalf("Unstable = %+v, want only flip", m.Unstable)
+	}
+	if fmt.Sprint(m.Unstable[0].Answers) != "[M0 M2.f M0]" {
+		t.Errorf("flip answers = %v", m.Unstable[0].Answers)
+	}
+	if len(m.WrongEveryRun) != 1 || m.WrongEveryRun[0].ID != "always-wrong" {
+		t.Errorf("WrongEveryRun = %+v, want only always-wrong", m.WrongEveryRun)
+	}
+
+	var out bytes.Buffer
+	m.Print(&out)
+	for _, want := range []string{"3 runs, 3 cases each", "Unstable cases", "flip", "Wrong in every run (1)", "always-wrong"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("summary missing %q:\n%s", want, out.String())
+		}
 	}
 }

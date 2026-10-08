@@ -31,9 +31,14 @@ func main() {
 		key       = flag.String("key", os.Getenv("ADRIAN_LLM_API_KEY"), "judge API key (default $ADRIAN_LLM_API_KEY)")
 		model     = flag.String("model", os.Getenv("ADRIAN_LLM_MODEL"), "judge model name (default $ADRIAN_LLM_MODEL)")
 		outPath   = flag.String("out", "", "also write the full report as JSON to this file")
+		runs      = flag.Int("runs", 1, "run every case this many times and report averages and unstable cases")
 	)
 	flag.Parse()
 
+	if *runs < 1 {
+		fmt.Fprintln(os.Stderr, "-runs must be 1 or more")
+		os.Exit(2)
+	}
 	if *url == "" || *model == "" {
 		fmt.Fprintln(os.Stderr, "need a judge: set -url and -model (or ADRIAN_LLM_URL and ADRIAN_LLM_MODEL)")
 		os.Exit(2)
@@ -52,11 +57,27 @@ func main() {
 	}
 
 	judge := engine.NewHTTPClient(*url, *key, *model, nil, nil)
-	report := Score(Run(context.Background(), judge, cases))
-	report.Print(os.Stdout)
+
+	// One run keeps the detailed report. Several runs print a summary of
+	// each, the averages, and the cases whose answer changed.
+	var output any
+	if *runs == 1 {
+		report := Score(Run(context.Background(), judge, cases))
+		report.Print(os.Stdout)
+		output = report
+	} else {
+		reps := make([]Report, 0, *runs)
+		for i := 1; i <= *runs; i++ {
+			fmt.Fprintf(os.Stderr, "run %d of %d...\n", i, *runs)
+			reps = append(reps, Score(Run(context.Background(), judge, cases)))
+		}
+		multi := Summarise(reps)
+		multi.Print(os.Stdout)
+		output = multi
+	}
 
 	if *outPath != "" {
-		data, err := json.MarshalIndent(report, "", "  ")
+		data, err := json.MarshalIndent(output, "", "  ")
 		if err == nil {
 			err = os.WriteFile(*outPath, data, 0o644)
 		}
