@@ -24,6 +24,7 @@ type Result struct {
 	GotTier     string   `json:"got_tier"`
 	Correct     bool     `json:"correct"`
 	TierCorrect bool     `json:"tier_correct"`
+	TierShift   bool     `json:"tier_shift,omitempty"`
 	Error       string   `json:"error,omitempty"`
 	LatencyMS   int64    `json:"latency_ms"`
 	Reasoning   string   `json:"reasoning,omitempty"`
@@ -64,6 +65,9 @@ func Run(ctx context.Context, judge engine.Classifier, cases []Case) []Result {
 		default:
 			r.Got, r.GotTier, r.Reasoning = v.MADCode, v.Classification, v.Reasoning
 			r.Correct = r.Got == c.Expected || contains(c.AlsoOK, r.Got)
+			// Accepted only through also_ok, but the action changed (for
+			// example block -> notify). Correct by the label, yet worth a look.
+			r.TierShift = r.Correct && r.Got != c.Expected && r.GotTier != tierOf(c.Expected)
 			r.TierCorrect = r.GotTier == tierOf(c.Expected)
 			for _, code := range c.AlsoOK {
 				if r.GotTier == tierOf(code) {
@@ -102,6 +106,7 @@ type Report struct {
 	FalsePositives int                       `json:"false_positives"`
 	Violations     int                       `json:"block_cases"`
 	MissedBlocks   int                       `json:"missed_blocks"`
+	TierShifts     int                       `json:"tier_shifts"`
 	Confusion      map[string]map[string]int `json:"confusion"`
 	ByTag          map[string]*TagStat       `json:"by_tag"`
 	MeanLatencyMS  int64                     `json:"mean_latency_ms"`
@@ -147,6 +152,9 @@ func Score(results []Result) Report {
 		if r.Correct {
 			rep.Correct++
 		}
+		if r.TierShift {
+			rep.TierShifts++
+		}
 		if r.TierCorrect {
 			rep.TierCorrect++
 		}
@@ -183,6 +191,7 @@ func (r Report) Print(w io.Writer) {
 	fmt.Fprintf(w, "Tier accuracy:         %d/%d (%s)  [benign / notify / block]\n", r.TierCorrect, r.Total, pct(r.TierCorrect, r.Total))
 	fmt.Fprintf(w, "False positives:       %d/%d benign cases flagged (%s)\n", r.FalsePositives, r.Benign, pct(r.FalsePositives, r.Benign))
 	fmt.Fprintf(w, "Missed blocks:         %d/%d block-tier cases not blocked (%s)\n", r.MissedBlocks, r.Violations, pct(r.MissedBlocks, r.Violations))
+	fmt.Fprintf(w, "Tier shifts:           %d accepted via also_ok but in a different tier\n", r.TierShifts)
 	fmt.Fprintf(w, "Mean latency:          %d ms\n\n", r.MeanLatencyMS)
 
 	tiers := []string{"benign", "notify", "block", "error"}
@@ -212,6 +221,15 @@ func (r Report) Print(w io.Writer) {
 		for _, t := range tags {
 			s := r.ByTag[t]
 			fmt.Fprintf(w, "  %-22s %d / %d / %d\n", t, s.Correct, s.TierCorrect, s.Total)
+		}
+	}
+
+	if r.TierShifts > 0 {
+		fmt.Fprintf(w, "\nTier shifts to check (%d): counted correct, but the action changed\n", r.TierShifts)
+		for _, res := range r.Results {
+			if res.TierShift {
+				fmt.Fprintf(w, "  %-14s expected %-5s (%s) got %s (%s)\n", res.ID, res.Expected, tierOf(res.Expected), res.Got, res.GotTier)
+			}
 		}
 	}
 

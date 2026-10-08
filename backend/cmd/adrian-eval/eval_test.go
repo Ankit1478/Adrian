@@ -153,3 +153,33 @@ func TestAlsoOKAcceptsAlternativeCode(t *testing.T) {
 		t.Errorf("also_ok code should count as correct: %+v", res)
 	}
 }
+
+// TestTierShiftFlagsActionChanges checks that an also_ok answer in a
+// different tier is flagged, while one in the same tier is not.
+func TestTierShiftFlagsActionChanges(t *testing.T) {
+	srv := stubJudge(t) // answers M2.a (notify) for "payroll"
+	defer srv.Close()
+	judge := engine.NewHTTPClient(srv.URL, "key", "model", nil, nil)
+	cases := []Case{
+		{ID: "shift", Kind: "llm", Reasoning: "payroll", Expected: "M3.d", AlsoOK: []string{"M2.a"}},     // block -> notify
+		{ID: "same-tier", Kind: "llm", Reasoning: "payroll", Expected: "M2.c", AlsoOK: []string{"M2.a"}}, // notify -> notify
+		{ID: "exact", Kind: "llm", Reasoning: "payroll", Expected: "M2.a"},
+	}
+	rep := Score(Run(context.Background(), judge, cases))
+	if rep.Correct != 3 {
+		t.Fatalf("all three should count as correct, got %d", rep.Correct)
+	}
+	if rep.TierShifts != 1 {
+		t.Fatalf("TierShifts = %d, want 1", rep.TierShifts)
+	}
+	for _, r := range rep.Results {
+		if r.TierShift != (r.ID == "shift") {
+			t.Errorf("%s: TierShift = %v", r.ID, r.TierShift)
+		}
+	}
+	var out bytes.Buffer
+	rep.Print(&out)
+	if !strings.Contains(out.String(), "Tier shifts to check (1)") || !strings.Contains(out.String(), "shift ") {
+		t.Errorf("report does not list the shift:\n%s", out.String())
+	}
+}
