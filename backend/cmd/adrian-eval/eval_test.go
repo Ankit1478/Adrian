@@ -12,7 +12,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/secureagentics/Adrian/backend/internal/engine"
 	pb "github.com/secureagentics/Adrian/backend/internal/proto"
@@ -218,6 +220,90 @@ func TestSummariseFindsUnstableAndAlwaysWrong(t *testing.T) {
 	for _, want := range []string{"3 runs, 3 cases each", "Unstable cases", "flip", "Wrong in every run (1)", "always-wrong"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("summary missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// countingJudge fails the first `failures` calls for a "flaky" trace with
+// 503, always answers 400 for a "bad-request" trace, and otherwise M0.
+func countingJudge(t *testing.T, failures int) (*httptest.Server, *int32, *int32) {
+	t.Helper()
+	var flakyCalls, badCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		current := body.Messages[len(body.Messages)-1].Content
+		switch {
+		case strings.Contains(current, "flaky"):
+			if int(atomic.AddInt32(&flakyCalls, 1)) <= failures {
+				http.Error(w, "busy", http.StatusServiceUnavailable)
+				return
+			}
+		case strings.Contains(current, "bad-request"):
+			atomic.AddInt32(&badCalls, 1)
+			http.Error(w, "bad", http.StatusBadRequest)
+			return
+		}
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"M0"}}]}`))
+	}))
+	return srv, &flakyCalls, &badCalls
+}
+
+func TestRetriesServerErrorsButNotBadRequests(t *testing.T) {
+	srv, flaky, bad := countingJudge(t, 2)
+	defer srv.Close()
+	judge := engine.NewHTTPClient(srv.URL, "k", "m", nil, nil)
+	opt := Options{Concurrency: 1, Retries: 2, Backoff: time.Millisecond}
+
+	res := RunWith(context.Background(), judge, []Case{
+		{ID: "flaky", Kind: "llm", Reasoning: "flaky", Expected: "M0"},
+		{ID: "bad", Kind: "llm", Reasoning: "bad-request", Expected: "M0"},
+	}, opt)
+
+	if res[0].Error != "" || !res[0].Correct || res[0].Retries != 2 {
+		t.Errorf("flaky: want success after 2 retries, got %+v", res[0])
+	}
+	if got := atomic.LoadInt32(flaky); got != 3 {
+		t.Errorf("flaky calls = %d, want 3", got)
+	}
+	if res[1].Error == "" || res[1].Retries != 0 {
+		t.Errorf("bad request: want error without retries, got %+v", res[1])
+	}
+	if got := atomic.LoadInt32(bad); got != 1 {
+		t.Errorf("bad-request calls = %d, want 1 (400 must not be retried)", got)
+	}
+}
+
+func TestRetriesGiveUpAfterLimit(t *testing.T) {
+	srv, flaky, _ := countingJudge(t, 10)
+	defer srv.Close()
+	judge := engine.NewHTTPClient(srv.URL, "k", "m", nil, nil)
+	res := RunWith(context.Background(), judge, []Case{{ID: "flaky", Kind: "llm", Reasoning: "flaky", Expected: "M0"}},
+		Options{Concurrency: 1, Retries: 2, Backoff: time.Millisecond})
+	if res[0].Error == "" || res[0].Retries != 2 {
+		t.Errorf("want error after 2 retries, got %+v", res[0])
+	}
+	if got := atomic.LoadInt32(flaky); got != 3 {
+		t.Errorf("calls = %d, want 3 (1 try + 2 retries)", got)
+	}
+}
+
+func TestConcurrencyKeepsCaseOrder(t *testing.T) {
+	srv, _, _ := countingJudge(t, 0)
+	defer srv.Close()
+	judge := engine.NewHTTPClient(srv.URL, "k", "m", nil, nil)
+	var cases []Case
+	for i := 0; i < 40; i++ {
+		cases = append(cases, Case{ID: fmt.Sprintf("c%02d", i), Kind: "llm", Reasoning: "x", Expected: "M0"})
+	}
+	res := RunWith(context.Background(), judge, cases, Options{Concurrency: 8})
+	for i, r := range res {
+		if r.ID != cases[i].ID || !r.Correct {
+			t.Fatalf("result %d = %+v, want case %s answered correctly", i, r, cases[i].ID)
 		}
 	}
 }

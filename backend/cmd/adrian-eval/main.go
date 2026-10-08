@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/secureagentics/Adrian/backend/internal/engine"
 )
@@ -32,6 +33,9 @@ func main() {
 		model     = flag.String("model", os.Getenv("ADRIAN_LLM_MODEL"), "judge model name (default $ADRIAN_LLM_MODEL)")
 		outPath   = flag.String("out", "", "also write the full report as JSON to this file")
 		runs      = flag.Int("runs", 1, "run every case this many times and report averages and unstable cases")
+		workers   = flag.Int("concurrency", 4, "how many cases to judge at once")
+		retries   = flag.Int("retries", 2, "extra attempts after a network or server error (judge answers are never retried)")
+		backoff   = flag.Duration("backoff", 2*time.Second, "wait before the first retry; doubles each time")
 	)
 	flag.Parse()
 
@@ -57,19 +61,20 @@ func main() {
 	}
 
 	judge := engine.NewHTTPClient(*url, *key, *model, nil, nil)
+	opt := Options{Concurrency: *workers, Retries: *retries, Backoff: *backoff}
 
 	// One run keeps the detailed report. Several runs print a summary of
 	// each, the averages, and the cases whose answer changed.
 	var output any
 	if *runs == 1 {
-		report := Score(Run(context.Background(), judge, cases))
+		report := Score(RunWith(context.Background(), judge, cases, opt))
 		report.Print(os.Stdout)
 		output = report
 	} else {
 		reps := make([]Report, 0, *runs)
 		for i := 1; i <= *runs; i++ {
 			fmt.Fprintf(os.Stderr, "run %d of %d...\n", i, *runs)
-			reps = append(reps, Score(Run(context.Background(), judge, cases)))
+			reps = append(reps, Score(RunWith(context.Background(), judge, cases, opt)))
 		}
 		multi := Summarise(reps)
 		multi.Print(os.Stdout)
