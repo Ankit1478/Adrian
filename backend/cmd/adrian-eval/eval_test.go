@@ -498,3 +498,56 @@ func TestCleanEndpointDropsSecrets(t *testing.T) {
 		t.Error("endpoint must not keep credentials")
 	}
 }
+
+func TestMetaRecordsSettingsAndPrices(t *testing.T) {
+	t.Setenv("ADRIAN_LLM_OMIT_SAMPLING_PARAMS", "TRUE")
+	if !envTrue("ADRIAN_LLM_OMIT_SAMPLING_PARAMS") {
+		t.Error("TRUE should read as true")
+	}
+	t.Setenv("ADRIAN_LLM_OMIT_SAMPLING_PARAMS", "no")
+	if envTrue("ADRIAN_LLM_OMIT_SAMPLING_PARAMS") {
+		t.Error("no should read as false")
+	}
+
+	p := Prices{Input: 2.4, CachedInput: 0.12, Output: 12}
+	m := Meta{Backoff: "2s", OmitSamplingParams: true, Prices: &p}
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"backoff":"2s"`, `"omit_sampling_params":true`, `"prices_usd_per_million":{"input":2.4,"cached_input":0.12,"output":12}`} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("meta JSON missing %s: %s", want, data)
+		}
+	}
+	if (Prices{}).Known() {
+		t.Error("zero prices should be unknown")
+	}
+}
+
+func TestAutoSavePathIsUniqueAndSafe(t *testing.T) {
+	dir := t.TempDir() + "/results"
+	if err := ensureResultsDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(dir + "/.gitignore"); err != nil || !strings.Contains(string(data), "*") {
+		t.Fatalf("results folder should ignore itself in git: %q %v", data, err)
+	}
+
+	now := time.Date(2026, 10, 8, 16, 40, 29, 0, time.UTC)
+	first := autoSavePath(dir, "gpt-6.1-sol", 1, now)
+	if !strings.HasSuffix(first, "/2026-10-08T16-40-29Z_gpt-6.1-sol.json") {
+		t.Errorf("first = %s", first)
+	}
+	os.WriteFile(first, []byte("{}"), 0o644)
+
+	second := autoSavePath(dir, "gpt-6.1-sol", 1, now) // same second: must not overwrite
+	if second == first || !strings.HasSuffix(second, "_gpt-6.1-sol-2.json") {
+		t.Errorf("second = %s, want a new -2 name", second)
+	}
+
+	multi := autoSavePath(dir, "org/model name:v2", 3, now)
+	if !strings.HasSuffix(multi, "_org-model-name-v2_runs3.json") {
+		t.Errorf("unsafe characters and runs suffix: %s", multi)
+	}
+}

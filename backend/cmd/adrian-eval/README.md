@@ -117,8 +117,9 @@ Answers from the judge are never retried, including an answer with no M-code. Th
 | Cases fingerprint and count | Which dataset was used. |
 | Git commit and uncommitted changes | Which code was tested. |
 | Start time and duration | When it ran. |
+| Settings | Runs, concurrency, retries, backoff, and whether `ADRIAN_LLM_OMIT_SAMPLING_PARAMS` was on. |
 | Token usage | Calls, input (and cached) tokens, output (and reasoning) tokens. |
-| Cost | Shown when you pass prices. |
+| Prices and cost | The prices you passed, and the cost they give. |
 
 To estimate cost, pass prices in USD per million tokens:
 
@@ -126,7 +127,24 @@ To estimate cost, pass prices in USD per million tokens:
 go run ./cmd/adrian-eval -price-in 2.40 -price-out 12 -price-cached 0.12
 ```
 
-Keep baseline reports somewhere permanent, such as a results folder you commit or an artefact store. A report in a temporary folder is lost when it is cleaned up.
+## Where reports are saved
+
+Every run is saved automatically, so a result is never lost:
+
+```text
+eval-results/2026-10-08T16-40-29Z_gpt-6.1-sol.json
+eval-results/2026-10-08T16-52-03Z_gpt-6.1-sol_runs3.json
+```
+
+The name holds the time (UTC) and the model, and a run never overwrites an earlier file.
+
+| Flag | Meaning |
+|---|---|
+| `-results-dir` | Folder for saved reports (default `eval-results`, relative to where you run the tool) |
+| `-out` | Save to this file instead |
+| `-no-save` | Only print the report |
+
+When the tool creates the folder it adds a `.gitignore` inside it, so saved reports do not show up as changes in git. To keep a report in git, such as an agreed baseline, add it with `git add -f`.
 
 ## Writing cases
 

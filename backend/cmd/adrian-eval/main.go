@@ -32,7 +32,9 @@ func main() {
 		url       = flag.String("url", os.Getenv("ADRIAN_LLM_URL"), "judge endpoint (default $ADRIAN_LLM_URL)")
 		key       = flag.String("key", os.Getenv("ADRIAN_LLM_API_KEY"), "judge API key (default $ADRIAN_LLM_API_KEY)")
 		model     = flag.String("model", os.Getenv("ADRIAN_LLM_MODEL"), "judge model name (default $ADRIAN_LLM_MODEL)")
-		outPath   = flag.String("out", "", "also write the full report as JSON to this file")
+		outPath   = flag.String("out", "", "save the full report to this file (default: a new file in -results-dir)")
+		resultDir = flag.String("results-dir", "eval-results", "folder for automatically saved reports")
+		noSave    = flag.Bool("no-save", false, "do not save the report, only print it")
 		runs      = flag.Int("runs", 1, "run every case this many times and report averages and unstable cases")
 		workers   = flag.Int("concurrency", 4, "how many cases to judge at once")
 		retries   = flag.Int("retries", 2, "extra attempts after a network or server error (judge answers are never retried)")
@@ -123,6 +125,11 @@ func main() {
 		Runs: *runs, Concurrency: *workers, Retries: *retries,
 		CasesFile: *casesPath, CasesSHA256: casesSum, CaseCount: len(cases),
 		PromptSHA256: promptSHA256(*promptDir), GitCommit: commit, GitDirty: dirty,
+		Backoff:            backoff.String(),
+		OmitSamplingParams: envTrue("ADRIAN_LLM_OMIT_SAMPLING_PARAMS"),
+	}
+	if prices.Known() {
+		meta.Prices = &prices
 	}
 
 	// One run keeps the detailed report. Several runs print a summary of
@@ -154,16 +161,26 @@ func main() {
 		verdict.Print(os.Stdout)
 	}
 
-	if *outPath != "" {
+	// Every run is saved unless -no-save is given, so a result is never
+	// lost for want of -out.
+	savePath := *outPath
+	if savePath == "" && !*noSave {
+		if err := ensureResultsDir(*resultDir); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		savePath = autoSavePath(*resultDir, *model, *runs, started)
+	}
+	if savePath != "" {
 		data, err := json.MarshalIndent(output, "", "  ")
 		if err == nil {
-			err = os.WriteFile(*outPath, data, 0o644)
+			err = os.WriteFile(savePath, data, 0o644)
 		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		fmt.Printf("\nFull report written to %s\n", *outPath)
+		fmt.Printf("\nFull report saved to %s\n", savePath)
 	}
 	if verdict != nil && !verdict.Passed {
 		os.Exit(1)

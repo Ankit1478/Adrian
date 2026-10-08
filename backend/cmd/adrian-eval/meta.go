@@ -22,14 +22,20 @@ import (
 // Meta records what a report measured, so any result can be traced back
 // to the exact judge, prompt, data and code. It never holds the API key.
 type Meta struct {
-	Tool         string  `json:"tool"`
-	StartedAt    string  `json:"started_at"`
-	DurationSec  float64 `json:"duration_sec"`
-	Model        string  `json:"model"`
-	Endpoint     string  `json:"endpoint"`
-	Runs         int     `json:"runs"`
-	Concurrency  int     `json:"concurrency"`
-	Retries      int     `json:"retries"`
+	Tool        string  `json:"tool"`
+	StartedAt   string  `json:"started_at"`
+	DurationSec float64 `json:"duration_sec"`
+	Model       string  `json:"model"`
+	Endpoint    string  `json:"endpoint"`
+	Runs        int     `json:"runs"`
+	Concurrency int     `json:"concurrency"`
+	Retries     int     `json:"retries"`
+	Backoff     string  `json:"backoff"`
+	// OmitSamplingParams records ADRIAN_LLM_OMIT_SAMPLING_PARAMS: whether
+	// temperature and stop were left out of the judge's requests.
+	OmitSamplingParams bool `json:"omit_sampling_params"`
+	// Prices are the USD per million tokens used for the cost, if given.
+	Prices       *Prices `json:"prices_usd_per_million,omitempty"`
 	CasesFile    string  `json:"cases_file"`
 	CasesSHA256  string  `json:"cases_sha256"`
 	CaseCount    int     `json:"case_count"`
@@ -111,7 +117,19 @@ func (u Usage) Sub(earlier Usage) Usage {
 
 // Prices are USD per million tokens. Zero means unknown.
 type Prices struct {
-	Input, CachedInput, Output float64
+	Input       float64 `json:"input"`
+	CachedInput float64 `json:"cached_input"`
+	Output      float64 `json:"output"`
+}
+
+// Known reports whether any price was given.
+func (p Prices) Known() bool { return p.Input != 0 || p.Output != 0 || p.CachedInput != 0 }
+
+// envTrue reads a true/false environment variable the same way the
+// judge client does: "1", "true" or "yes", in any case.
+func envTrue(name string) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return v == "1" || v == "true" || v == "yes"
 }
 
 // WithCost fills CostUSD when prices are known. Cached input tokens are
@@ -199,6 +217,11 @@ func (m Meta) Print(w io.Writer) {
 	fmt.Fprintf(w, "Prompt fingerprint:    %s\n", short(m.PromptSHA256))
 	fmt.Fprintf(w, "Cases:                 %d from %s (%s)\n", m.CaseCount, m.CasesFile, short(m.CasesSHA256))
 	fmt.Fprintf(w, "Code:                  %s%s, %s, %.0fs\n", m.GitCommit, dirty, m.StartedAt, m.DurationSec)
+	fmt.Fprintf(w, "Settings:              runs %d, concurrency %d, retries %d, backoff %s, omit sampling params %v\n",
+		m.Runs, m.Concurrency, m.Retries, m.Backoff, m.OmitSamplingParams)
+	if m.Prices != nil {
+		fmt.Fprintf(w, "Prices (USD/M tokens): input %.2f, cached input %.2f, output %.2f\n", m.Prices.Input, m.Prices.CachedInput, m.Prices.Output)
+	}
 }
 
 func short(sum string) string {
