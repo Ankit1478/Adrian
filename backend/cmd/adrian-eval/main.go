@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/secureagentics/Adrian/backend/internal/engine"
@@ -172,6 +173,14 @@ func main() {
 		savePath = autoSavePath(*resultDir, *model, *runs, started)
 	}
 	if savePath != "" {
+		// Create the folder for -out too, so a missing folder never loses
+		// a finished (and paid-for) run.
+		if dir := filepath.Dir(savePath); dir != "." {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+		}
 		data, err := json.MarshalIndent(output, "", "  ")
 		if err == nil {
 			err = os.WriteFile(savePath, data, 0o644)
