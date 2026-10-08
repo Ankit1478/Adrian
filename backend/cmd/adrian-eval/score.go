@@ -103,6 +103,7 @@ type Report struct {
 	MeanLatencyMS  int64                     `json:"mean_latency_ms"`
 	Retries        int                       `json:"retries"`
 	Results        []Result                  `json:"results"`
+	Gate           *GateResult               `json:"gate,omitempty"`
 }
 
 // Score turns raw results into a report. False positives and missed

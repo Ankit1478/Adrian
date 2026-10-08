@@ -307,3 +307,60 @@ func TestConcurrencyKeepsCaseOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestGatePassesFailsAndSkips(t *testing.T) {
+	off := Thresholds{MaxMissedBlocksPct: -1, MaxFalsePositivesPct: -1, MinTierAccuracyPct: -1, MaxErrorPct: -1}
+	if !off.Off() {
+		t.Fatal("all-negative thresholds should be off")
+	}
+
+	// 100 cases: 95 tier-correct, 2 errors; 40 benign with 1 flagged;
+	// 30 block cases with 2 missed.
+	m := gateMetrics{total: 100, tierCorrect: 95, errors: 2, benign: 40, falsePositives: 1, blockCases: 30, missedBlocks: 2}
+
+	pass := CheckGate(m, Thresholds{MaxMissedBlocksPct: 10, MaxFalsePositivesPct: 5, MinTierAccuracyPct: 90, MaxErrorPct: 5})
+	if !pass.Passed || len(pass.Checks) != 4 {
+		t.Errorf("want pass with 4 checks, got %+v", pass)
+	}
+
+	fail := CheckGate(m, Thresholds{MaxMissedBlocksPct: 5, MaxFalsePositivesPct: -1, MinTierAccuracyPct: 96, MaxErrorPct: -1})
+	if fail.Passed || len(fail.Reasons) != 2 {
+		t.Errorf("want fail on missed blocks (6.7%%) and tier accuracy (95%%), got %+v", fail)
+	}
+
+	skip := CheckGate(gateMetrics{total: 10, tierCorrect: 10}, Thresholds{MaxMissedBlocksPct: 1, MaxFalsePositivesPct: -1, MinTierAccuracyPct: -1, MaxErrorPct: -1})
+	if !skip.Passed || !strings.Contains(skip.Checks[0], "skipped") {
+		t.Errorf("no block cases should skip, not fail: %+v", skip)
+	}
+
+	var out bytes.Buffer
+	fail.Print(&out)
+	if !strings.Contains(out.String(), "Gate: FAIL") || !strings.Contains(out.String(), "FAIL missed blocks 6.7%") {
+		t.Errorf("gate output:\n%s", out.String())
+	}
+}
+
+// TestGateFailsWhenJudgeNeverAnswers guards the bug where a run with only
+// errors passed the gate because "no block cases were answered".
+func TestGateFailsWhenJudgeNeverAnswers(t *testing.T) {
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad", http.StatusBadRequest) // not retried
+	}))
+	defer broken.Close()
+	judge := engine.NewHTTPClient(broken.URL, "k", "m", nil, nil)
+	rep := Score(Run(context.Background(), judge, []Case{
+		{ID: "b1", Kind: "llm", Reasoning: "x", Expected: "M3.c"},
+		{ID: "b2", Kind: "llm", Reasoning: "y", Expected: "M4.d"},
+		{ID: "s1", Kind: "llm", Reasoning: "z", Expected: "M0"},
+	}))
+	if rep.Errors != 3 {
+		t.Fatalf("errors = %d, want 3", rep.Errors)
+	}
+	g := CheckGate(rep.gateMetrics(), Thresholds{MaxMissedBlocksPct: 5, MaxFalsePositivesPct: -1, MinTierAccuracyPct: -1, MaxErrorPct: -1})
+	if g.Passed {
+		t.Fatalf("a run where the judge never answered must fail the missed-blocks check: %+v", g)
+	}
+	if !strings.Contains(g.Checks[0], "100.0%") {
+		t.Errorf("both block cases should count as missed: %+v", g.Checks)
+	}
+}

@@ -36,7 +36,12 @@ func main() {
 		workers   = flag.Int("concurrency", 4, "how many cases to judge at once")
 		retries   = flag.Int("retries", 2, "extra attempts after a network or server error (judge answers are never retried)")
 		backoff   = flag.Duration("backoff", 2*time.Second, "wait before the first retry; doubles each time")
+		gate      = Thresholds{}
 	)
+	flag.Float64Var(&gate.MaxMissedBlocksPct, "max-missed-blocks", -1, "fail if missed blocks exceed this percent (off if negative)")
+	flag.Float64Var(&gate.MaxFalsePositivesPct, "max-false-positives", -1, "fail if false positives exceed this percent (off if negative)")
+	flag.Float64Var(&gate.MinTierAccuracyPct, "min-tier-accuracy", -1, "fail if tier accuracy is below this percent (off if negative)")
+	flag.Float64Var(&gate.MaxErrorPct, "max-errors", -1, "fail if errors exceed this percent of cases (off if negative)")
 	flag.Parse()
 
 	if *runs < 1 {
@@ -66,9 +71,14 @@ func main() {
 	// One run keeps the detailed report. Several runs print a summary of
 	// each, the averages, and the cases whose answer changed.
 	var output any
+	var verdict *GateResult
 	if *runs == 1 {
 		report := Score(RunWith(context.Background(), judge, cases, opt))
 		report.Print(os.Stdout)
+		if !gate.Off() {
+			g := CheckGate(report.gateMetrics(), gate)
+			report.Gate, verdict = &g, &g
+		}
 		output = report
 	} else {
 		reps := make([]Report, 0, *runs)
@@ -78,7 +88,14 @@ func main() {
 		}
 		multi := Summarise(reps)
 		multi.Print(os.Stdout)
+		if !gate.Off() {
+			g := CheckGate(multi.gateMetrics(), gate)
+			multi.Gate, verdict = &g, &g
+		}
 		output = multi
+	}
+	if verdict != nil {
+		verdict.Print(os.Stdout)
 	}
 
 	if *outPath != "" {
@@ -91,5 +108,8 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("\nFull report written to %s\n", *outPath)
+	}
+	if verdict != nil && !verdict.Passed {
+		os.Exit(1)
 	}
 }

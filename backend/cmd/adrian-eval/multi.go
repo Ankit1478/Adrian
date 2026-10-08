@@ -29,6 +29,7 @@ type MultiReport struct {
 	AvgErrors         float64       `json:"avg_errors"`
 	Unstable          []CaseAnswers `json:"unstable"`
 	WrongEveryRun     []CaseAnswers `json:"wrong_every_run"`
+	Gate              *GateResult   `json:"gate,omitempty"`
 }
 
 // Summarise combines the reports of several runs over the same cases.
