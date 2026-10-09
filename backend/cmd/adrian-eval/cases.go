@@ -31,10 +31,34 @@ type Case struct {
 	ToolName          string         `json:"tool_name"`
 	Input             string         `json:"input"`
 	Output            string         `json:"output"`
-	Expected          string         `json:"expected"`
-	AlsoOK            []string       `json:"also_ok"`
-	Note              string         `json:"note"`
-	Tags              []string       `json:"tags"`
+	// Steps turns this into a multi-step case: the events are judged in
+	// order and share one conversation, so each step sees the earlier
+	// ones as history, exactly as the backend's sliding window does in
+	// production. Each step is graded separately.
+	Steps    []CaseStep `json:"steps,omitempty"`
+	Expected string     `json:"expected"`
+	AlsoOK   []string   `json:"also_ok"`
+	Note     string     `json:"note"`
+	Tags     []string   `json:"tags"`
+
+	// conversation groups the steps of one multi-step case. Empty means
+	// the case is its own conversation.
+	conversation string
+}
+
+// CaseStep is one event of a multi-step case. It carries the same
+// event fields as a single case, plus its own expected label.
+type CaseStep struct {
+	Kind      string         `json:"kind"`
+	Reasoning string         `json:"reasoning"`
+	Response  string         `json:"response"`
+	ToolCalls []CaseToolCall `json:"tool_calls"`
+	ToolName  string         `json:"tool_name"`
+	Input     string         `json:"input"`
+	Output    string         `json:"output"`
+	Expected  string         `json:"expected"`
+	AlsoOK    []string       `json:"also_ok"`
+	Note      string         `json:"note"`
 }
 
 // CaseToolCall is a tool call the model wants to make (kind "llm").
@@ -48,6 +72,20 @@ var codePattern = regexp.MustCompile(`^M[0234](\.[a-z])?$`)
 func (c Case) validate() error {
 	if c.ID == "" {
 		return fmt.Errorf("id is required")
+	}
+	if len(c.Steps) > 0 {
+		if c.Expected != "" {
+			return fmt.Errorf("a multi-step case has no top-level expected; put one on each step")
+		}
+		if len(c.Steps) < 2 {
+			return fmt.Errorf("a multi-step case needs at least 2 steps")
+		}
+		for i, st := range c.Steps {
+			if err := st.asCase(c, i).validate(); err != nil {
+				return fmt.Errorf("step %d: %w", i+1, err)
+			}
+		}
+		return nil
 	}
 	switch c.Kind {
 	case "llm":
@@ -107,13 +145,52 @@ func LoadCases(r io.Reader) ([]Case, error) {
 	return cases, nil
 }
 
+// asCase renders step i as a standalone Case, inheriting the parent's
+// agent prompt and user instruction. The id carries the step number so
+// each step is reported separately.
+func (st CaseStep) asCase(parent Case, i int) Case {
+	return Case{
+		ID:                fmt.Sprintf("%s#%d", parent.ID, i+1),
+		Kind:              st.Kind,
+		AgentSystemPrompt: parent.AgentSystemPrompt,
+		UserInstruction:   parent.UserInstruction,
+		Reasoning:         st.Reasoning,
+		Response:          st.Response,
+		ToolCalls:         st.ToolCalls,
+		ToolName:          st.ToolName,
+		Input:             st.Input,
+		Output:            st.Output,
+		Expected:          st.Expected,
+		AlsoOK:            st.AlsoOK,
+		Note:              st.Note,
+		Tags:              parent.Tags,
+	}
+}
+
+// Unroll returns the cases to judge, in order. A single case returns
+// itself; a multi-step case returns one case per step. Every returned
+// case shares the parent's id as its conversation, so the steps chain
+// through the sliding window while separate cases stay isolated.
+func (c Case) Unroll() []Case {
+	if len(c.Steps) == 0 {
+		return []Case{c}
+	}
+	out := make([]Case, 0, len(c.Steps))
+	for i, st := range c.Steps {
+		step := st.asCase(c, i)
+		step.conversation = c.ID
+		out = append(out, step)
+	}
+	return out
+}
+
 // ToEvent builds the protobuf event the backend would receive, so the
 // judge sees exactly what it sees in production.
 func (c Case) ToEvent() *pb.PairedEvent {
 	ev := &pb.PairedEvent{
 		EventId:      c.ID,
-		SessionId:    "eval",
-		InvocationId: "eval",
+		SessionId:    c.conversationID(),
+		InvocationId: c.conversationID(),
 		Agent: &pb.AgentContext{
 			AgentId:         "eval-agent",
 			SystemPrompt:    c.AgentSystemPrompt,
@@ -137,4 +214,14 @@ func (c Case) ToEvent() *pb.PairedEvent {
 	ev.PairType = pb.PairType_PAIR_TYPE_LLM
 	ev.Data = &pb.PairedEvent_Llm{Llm: llm}
 	return ev
+}
+
+// conversationID is the sliding-window key for this case. Each case is
+// its own conversation unless it is a step of a multi-step case, so
+// cases never see each other's history.
+func (c Case) conversationID() string {
+	if c.conversation != "" {
+		return c.conversation
+	}
+	return c.ID
 }

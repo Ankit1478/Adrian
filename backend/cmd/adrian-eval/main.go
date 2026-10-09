@@ -101,7 +101,12 @@ func main() {
 	http.DefaultTransport = meter
 	prices := Prices{Input: *priceIn, CachedInput: *priceHit, Output: *priceOut}
 
-	judge := engine.NewHTTPClient(*url, *key, *model, nil, nil)
+	// A sliding window gives each case its own conversation, keyed by the
+	// case id, so the steps of a multi-step case chain through history
+	// exactly as they do in production while separate cases stay
+	// isolated. Single-step cases simply see an empty history.
+	window := engine.NewSlidingWindow(engine.WindowOpts{Size: 16, TTL: time.Hour})
+	judge := engine.NewHTTPClient(*url, *key, *model, window, nil)
 	opt := Options{Concurrency: *workers, Retries: *retries, Backoff: *backoff}
 
 	started := time.Now()

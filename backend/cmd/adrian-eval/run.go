@@ -30,12 +30,15 @@ func Run(ctx context.Context, judge engine.Classifier, cases []Case) []Result {
 }
 
 // RunWith judges every case using opt. Results keep the order of cases.
+// A multi-step case is judged step by step, in order and in one
+// goroutine, so the judge sees the earlier steps as history; it
+// contributes one result per step.
 func RunWith(ctx context.Context, judge engine.Classifier, cases []Case, opt Options) []Result {
 	workers := opt.Concurrency
 	if workers < 1 {
 		workers = 1
 	}
-	results := make([]Result, len(cases))
+	perCase := make([][]Result, len(cases))
 	slots := make(chan struct{}, workers)
 	var wg sync.WaitGroup
 	for i, c := range cases {
@@ -44,10 +47,20 @@ func RunWith(ctx context.Context, judge engine.Classifier, cases []Case, opt Opt
 		go func(i int, c Case) {
 			defer wg.Done()
 			defer func() { <-slots }()
-			results[i] = runOne(ctx, judge, c, opt)
+			steps := c.Unroll()
+			out := make([]Result, 0, len(steps))
+			for _, step := range steps {
+				out = append(out, runOne(ctx, judge, step, opt))
+			}
+			perCase[i] = out
 		}(i, c)
 	}
 	wg.Wait()
+
+	results := make([]Result, 0, len(cases))
+	for _, rs := range perCase {
+		results = append(results, rs...)
+	}
 	return results
 }
 
