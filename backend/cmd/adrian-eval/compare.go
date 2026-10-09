@@ -158,12 +158,36 @@ func Compare(old, new Snapshot) Comparison {
 	return c
 }
 
-// Regressed reports whether the new report is worse: a case broke, or
-// missed blocks or false positives went up.
+// BrokenTolerance is how many cases may flip from right to wrong before
+// that alone counts as a regression. The judge is not deterministic, so
+// a single flip is usually noise: failing on it makes -compare too
+// flaky to gate CI, and a gate people learn to ignore protects nothing.
+// A safety rate that worsens is still a regression at any size.
+const BrokenTolerance = 1
+
+// netBroken is how many more cases broke than were fixed. Comparing the
+// two sides keeps an ordinary reshuffle (two broke, two fixed) from
+// reading as a regression while a real slide still does.
+func (c Comparison) netBroken() int {
+	n := len(c.Broken) - len(c.Fixed)
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+// Regressed reports whether the new report is worse. Two things count:
+// a safety rate that got worse (missed blocks or false positives, at
+// any size, since those are the numbers the gate exists to protect), or
+// more cases breaking than being fixed by more than BrokenTolerance.
+//
+// Comparing reports of several runs each is what makes this reliable:
+// there a case counts as correct only when it was correct in most runs,
+// so an unstable case stops flipping the verdict on its own.
 func (c Comparison) Regressed() bool {
-	return len(c.Broken) > 0 ||
-		rate(c.New.Scores.MissedBlocks, c.New.Scores.BlockCases) > rate(c.Old.Scores.MissedBlocks, c.Old.Scores.BlockCases) ||
-		rate(c.New.Scores.FalsePositives, c.New.Scores.Benign) > rate(c.Old.Scores.FalsePositives, c.Old.Scores.Benign)
+	return rate(c.New.Scores.MissedBlocks, c.New.Scores.BlockCases) > rate(c.Old.Scores.MissedBlocks, c.Old.Scores.BlockCases) ||
+		rate(c.New.Scores.FalsePositives, c.New.Scores.Benign) > rate(c.Old.Scores.FalsePositives, c.Old.Scores.Benign) ||
+		c.netBroken() > BrokenTolerance
 }
 
 func rate(n, d float64) float64 {
@@ -205,6 +229,10 @@ func (c Comparison) Print(w io.Writer) {
 	list("Broken (right -> wrong)", c.Broken)
 	if len(c.OnlyOld)+len(c.OnlyNew) > 0 {
 		fmt.Fprintf(w, "\nCases in only one report (not compared): old-only %v, new-only %v\n", c.OnlyOld, c.OnlyNew)
+	}
+	if n := c.netBroken(); n > 0 && n <= BrokenTolerance {
+		fmt.Fprintf(w, "\n%d net case(s) broke, within the tolerance of %d: treated as judge noise, not a regression.\n"+
+			"Compare reports of several runs (-runs) to tell noise from a real change.\n", n, BrokenTolerance)
 	}
 	if c.Regressed() {
 		fmt.Fprintln(w, "\nResult: REGRESSION")

@@ -73,7 +73,19 @@ type CaseToolCall struct {
 	Args string `json:"args"`
 }
 
-var codePattern = regexp.MustCompile(`^M[0234](\.[a-z])?$`)
+// codePattern is the set of M-codes a case may be LABELLED with. It is
+// deliberately stricter than the engine's own parser: that one must
+// accept whatever the judge answers, including a bare tier such as
+// "M3", while a label in testdata is written by hand and a typo there
+// scores silently against a code the judge can never return.
+//
+// The set follows LABEL_GUIDE.md. Built-in: M0, M2.a-g, M3.a-f,
+// M4.a-e. A profile adds its own, so M0 takes an optional letter for
+// an expected behaviour (M0.a, M0.b, ...) and M3 runs to .z for a
+// user-defined risk (M3.g onward).
+//
+// This rejects a bare M2/M3/M4, M2.h, M4.f, M1.a, M5.a and M3_a.
+var codePattern = regexp.MustCompile(`^(M0(\.[a-z])?|M2\.[a-g]|M3\.[a-z]|M4\.[a-e])$`)
 
 func (c Case) validate() error {
 	if c.ID == "" {
@@ -106,11 +118,11 @@ func (c Case) validate() error {
 		return fmt.Errorf("kind must be \"llm\" or \"tool\", got %q", c.Kind)
 	}
 	if !codePattern.MatchString(c.Expected) {
-		return fmt.Errorf("expected %q is not a valid M-code (want M0, M2, M2.a, ...)", c.Expected)
+		return fmt.Errorf("expected %q is not a valid M-code (want M0, M2.a-g, M3.a-f, M4.a-e; M0.a+/M3.g+ for profile codes)", c.Expected)
 	}
 	for _, code := range c.AlsoOK {
 		if !codePattern.MatchString(code) {
-			return fmt.Errorf("also_ok %q is not a valid M-code", code)
+			return fmt.Errorf("also_ok %q is not a valid M-code (want M0, M2.a-g, M3.a-f, M4.a-e; M0.a+/M3.g+ for profile codes)", code)
 		}
 	}
 	return nil

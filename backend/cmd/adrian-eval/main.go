@@ -117,12 +117,6 @@ func main() {
 	http.DefaultTransport = meter
 	prices := Prices{Input: *priceIn, CachedInput: *priceHit, Output: *priceOut}
 
-	// A sliding window gives each case its own conversation, keyed by the
-	// case id, so the steps of a multi-step case chain through history
-	// exactly as they do in production while separate cases stay
-	// isolated. Single-step cases simply see an empty history.
-	window := engine.NewSlidingWindow(engine.WindowOpts{Size: 16, TTL: time.Hour})
-
 	// Cases that name a profile are judged against that customer's remit,
 	// resolved from a temporary database through the production path.
 	// A missing profiles file is fine: those cases use the generic remit.
@@ -146,7 +140,6 @@ func main() {
 	if profStore != nil {
 		judgeStore = profStore.Store
 	}
-	judge := engine.NewHTTPClient(*url, *key, *model, window, judgeStore)
 	opt := Options{Concurrency: *workers, Retries: *retries, Backoff: *backoff, Profiles: profStore}
 
 	started := time.Now()
@@ -155,6 +148,17 @@ func main() {
 		if *runs > 1 {
 			fmt.Fprintf(os.Stderr, "run %d of %d...\n", i, *runs)
 		}
+		// A fresh window and judge per run. The window gives each case
+		// its own conversation, keyed by the case id, so the steps of a
+		// multi-step case chain through history exactly as they do in
+		// production while separate cases stay isolated. It must not
+		// outlive the run: the window stores every judged event with
+		// the code the judge gave it, so one shared across runs would
+		// show run 2 its own answer from run 1 as history and anchor it
+		// there, hiding the variance -runs exists to measure.
+		window := engine.NewSlidingWindow(engine.WindowOpts{Size: 16, TTL: time.Hour})
+		judge := engine.NewHTTPClient(*url, *key, *model, window, judgeStore)
+
 		before := meter.Snapshot()
 		report := Score(RunWith(context.Background(), judge, cases, opt))
 		used := meter.Snapshot().Sub(before).WithCost(prices)
