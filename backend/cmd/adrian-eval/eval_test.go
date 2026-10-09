@@ -666,3 +666,105 @@ func TestMultiStepValidation(t *testing.T) {
 		t.Errorf("steps must share the parent conversation, got %q and %q", a, b)
 	}
 }
+
+// TestProfileReachesTheJudgePrompt proves that a case's profile is
+// resolved from the database and rendered into the judge's system
+// prompt, so the same action can be judged differently per agent.
+func TestProfileReachesTheJudgePrompt(t *testing.T) {
+	profiles := map[string]Profile{
+		"hr":     {Name: "HR", Remit: "Answer holiday questions only.", Risks: []string{"Reading payroll data"}},
+		"export": {Name: "Export", Remit: "Produce the customer export.", Expected: []string{"Exporting customers"}},
+	}
+	ps, err := NewProfileStore(context.Background(), profiles)
+	if err != nil {
+		t.Fatalf("profile store: %v", err)
+	}
+	defer ps.Close()
+
+	var mu sync.Mutex
+	systems := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct{ Content string } `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		systems[body.Messages[len(body.Messages)-1].Content] = body.Messages[0].Content
+		mu.Unlock()
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"M0"}}]}`))
+	}))
+	defer srv.Close()
+
+	window := engine.NewSlidingWindow(engine.WindowOpts{Size: 16, TTL: time.Hour})
+	judge := engine.NewHTTPClient(srv.URL, "k", "m", window, ps.Store)
+	cases := []Case{
+		{ID: "hr-case", Kind: "llm", Profile: "hr", Reasoning: "marker-hr", Expected: "M0"},
+		{ID: "ex-case", Kind: "llm", Profile: "export", Reasoning: "marker-export", Expected: "M0"},
+		{ID: "no-profile", Kind: "llm", Reasoning: "marker-none", Expected: "M0"},
+	}
+	RunWith(context.Background(), judge, cases, Options{Concurrency: 1, Profiles: ps})
+
+	find := func(marker string) string {
+		for trace, sys := range systems {
+			if strings.Contains(trace, marker) {
+				return sys
+			}
+		}
+		t.Fatalf("no call carried %q", marker)
+		return ""
+	}
+	hr, export, none := find("marker-hr"), find("marker-export"), find("marker-none")
+
+	if !strings.Contains(hr, "Answer holiday questions only.") {
+		t.Errorf("hr profile remit missing from its system prompt")
+	}
+	if !strings.Contains(hr, "Reading payroll data") {
+		t.Errorf("hr profile risk missing from its system prompt")
+	}
+	if !strings.Contains(export, "Produce the customer export.") {
+		t.Errorf("export profile remit missing from its system prompt")
+	}
+	if strings.Contains(export, "Answer holiday questions only.") {
+		t.Errorf("export case was judged against the hr remit")
+	}
+	if strings.Contains(none, "Answer holiday questions only.") || strings.Contains(none, "Produce the customer export.") {
+		t.Errorf("a case with no profile must use the generic remit")
+	}
+	if hr == export {
+		t.Errorf("two profiles produced an identical system prompt")
+	}
+}
+
+func TestProfileLoadingAndUnknownNames(t *testing.T) {
+	dir := t.TempDir()
+	good := dir + "/p.json"
+	os.WriteFile(good, []byte(`{"a":{"name":"A","remit":"Do A.","expected":["x"],"risks":["y"]}}`), 0o644)
+	ps, err := LoadProfiles(good)
+	if err != nil || ps["a"].Remit != "Do A." {
+		t.Fatalf("LoadProfiles = %+v, %v", ps, err)
+	}
+	noRemit := dir + "/bad.json"
+	os.WriteFile(noRemit, []byte(`{"a":{"name":"A"}}`), 0o644)
+	if _, err := LoadProfiles(noRemit); err == nil {
+		t.Error("a profile without a remit should be rejected")
+	}
+	typo := dir + "/typo.json"
+	os.WriteFile(typo, []byte(`{"a":{"name":"A","remitt":"Do A."}}`), 0o644)
+	if _, err := LoadProfiles(typo); err == nil {
+		t.Error("an unknown field should be rejected")
+	}
+	if err := checkProfileNames([]Case{{ID: "c", Profile: "missing"}}, ps); err == nil {
+		t.Error("a case naming an unknown profile should fail loudly")
+	}
+	if err := checkProfileNames([]Case{{ID: "c", Profile: "a"}, {ID: "d"}}, ps); err != nil {
+		t.Errorf("known and empty profile names should pass: %v", err)
+	}
+	// Steps inherit the parent's profile.
+	parent := Case{ID: "s", Profile: "a", Steps: []CaseStep{
+		{Kind: "llm", Reasoning: "x", Expected: "M0"}, {Kind: "llm", Reasoning: "y", Expected: "M0"}}}
+	for _, st := range parent.Unroll() {
+		if st.Profile != "a" {
+			t.Errorf("step %s lost the profile", st.ID)
+		}
+	}
+}

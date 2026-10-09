@@ -22,6 +22,9 @@ type Options struct {
 	Retries int
 	// Backoff is the wait before the first retry; it doubles each time.
 	Backoff time.Duration
+	// Profiles resolves a case's profile name to its database id. Nil
+	// means every case is judged against the generic remit.
+	Profiles *ProfileStore
 }
 
 // Run judges every case one at a time with no retries.
@@ -70,7 +73,7 @@ func runOne(ctx context.Context, judge engine.Classifier, c Case, opt Options) R
 	wait := opt.Backoff
 	for attempt := 0; ; attempt++ {
 		start := time.Now()
-		v, err := judge.Classify(ctx, c.ToEvent(), "")
+		v, err := judge.Classify(ctx, c.ToEvent(), opt.Profiles.IDFor(c.Profile))
 		latency := time.Since(start).Milliseconds()
 
 		if err == nil || attempt >= opt.Retries || !isTransient(err) {

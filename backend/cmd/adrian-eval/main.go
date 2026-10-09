@@ -25,7 +25,22 @@ import (
 	"time"
 
 	"github.com/secureagentics/Adrian/backend/internal/engine"
+	"github.com/secureagentics/Adrian/backend/internal/store"
 )
+
+// checkProfileNames fails loudly when a case names a profile that does
+// not exist, instead of silently judging it against the generic remit.
+func checkProfileNames(cases []Case, profiles map[string]Profile) error {
+	for _, c := range cases {
+		if c.Profile == "" {
+			continue
+		}
+		if _, ok := profiles[c.Profile]; !ok {
+			return fmt.Errorf("case %s names unknown profile %q", c.ID, c.Profile)
+		}
+	}
+	return nil
+}
 
 func main() {
 	var (
@@ -47,6 +62,7 @@ func main() {
 		priceOut  = flag.Float64("price-out", 0, "USD per million output tokens, for the cost estimate")
 		priceHit  = flag.Float64("price-cached", 0, "USD per million cached input tokens (defaults to -price-in)")
 		promptDir = flag.String("prompt-dir", "", "folder holding system_prompt.md and few_shot.md, for the prompt fingerprint")
+		profPath  = flag.String("profiles", "cmd/adrian-eval/testdata/profiles.json", "JSON file of agent profiles a case can name")
 	)
 	flag.Float64Var(&gate.MaxMissedBlocksPct, "max-missed-blocks", -1, "fail if missed blocks exceed this percent (off if negative)")
 	flag.Float64Var(&gate.MaxFalsePositivesPct, "max-false-positives", -1, "fail if false positives exceed this percent (off if negative)")
@@ -106,8 +122,32 @@ func main() {
 	// exactly as they do in production while separate cases stay
 	// isolated. Single-step cases simply see an empty history.
 	window := engine.NewSlidingWindow(engine.WindowOpts{Size: 16, TTL: time.Hour})
-	judge := engine.NewHTTPClient(*url, *key, *model, window, nil)
-	opt := Options{Concurrency: *workers, Retries: *retries, Backoff: *backoff}
+
+	// Cases that name a profile are judged against that customer's remit,
+	// resolved from a temporary database through the production path.
+	// A missing profiles file is fine: those cases use the generic remit.
+	profiles, err := LoadProfiles(*profPath)
+	if err != nil && !os.IsNotExist(err) {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	profStore, err := NewProfileStore(context.Background(), profiles)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer profStore.Close()
+	if err := checkProfileNames(cases, profiles); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+
+	var judgeStore *store.Store
+	if profStore != nil {
+		judgeStore = profStore.Store
+	}
+	judge := engine.NewHTTPClient(*url, *key, *model, window, judgeStore)
+	opt := Options{Concurrency: *workers, Retries: *retries, Backoff: *backoff, Profiles: profStore}
 
 	started := time.Now()
 	reps := make([]Report, 0, *runs)

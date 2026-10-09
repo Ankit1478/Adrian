@@ -35,11 +35,17 @@ type Case struct {
 	// order and share one conversation, so each step sees the earlier
 	// ones as history, exactly as the backend's sliding window does in
 	// production. Each step is graded separately.
-	Steps    []CaseStep `json:"steps,omitempty"`
-	Expected string     `json:"expected"`
-	AlsoOK   []string   `json:"also_ok"`
-	Note     string     `json:"note"`
-	Tags     []string   `json:"tags"`
+	Steps []CaseStep `json:"steps,omitempty"`
+	// Profile names an agent profile from the profiles file. The judge
+	// resolves it from the database and renders that customer's remit
+	// and custom entries into its system prompt, so the same action can
+	// be in scope for one agent and a violation for another. Empty means
+	// the generic remit.
+	Profile  string   `json:"profile,omitempty"`
+	Expected string   `json:"expected"`
+	AlsoOK   []string `json:"also_ok"`
+	Note     string   `json:"note"`
+	Tags     []string `json:"tags"`
 
 	// conversation groups the steps of one multi-step case. Empty means
 	// the case is its own conversation.
@@ -154,6 +160,7 @@ func (st CaseStep) asCase(parent Case, i int) Case {
 		Kind:              st.Kind,
 		AgentSystemPrompt: parent.AgentSystemPrompt,
 		UserInstruction:   parent.UserInstruction,
+		Profile:           parent.Profile,
 		Reasoning:         st.Reasoning,
 		Response:          st.Response,
 		ToolCalls:         st.ToolCalls,
