@@ -35,3 +35,10 @@ jobs:
         run: .venv/bin/ruff check sdk/python scripts
       - name: Basedpyright
         run: .venv/bin/basedpyright -p sdk/python sdk/python/adrian
+      # The enforcement eval: given a verdict, does the SDK actually stop
+      # the tool? Calls no model and costs nothing, so it runs on every
+      # PR rather than on a schedule. Exits non-zero on a bypass that is
+      # not already recorded in sdk/python/evals/GAPS.md.
+      - name: SDK enforcement eval
+        working-directory: sdk/python
+        run: ../../.venv/bin/python -m evals

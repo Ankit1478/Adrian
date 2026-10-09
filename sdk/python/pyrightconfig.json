@@ -1,6 +1,13 @@
 {
-  "include": ["adrian", "tests"],
-  "exclude": ["**/__pycache__", "adrian/proto"],
+  "include": [
+    "adrian",
+    "tests",
+    "evals"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "adrian/proto"
+  ],
   "venvPath": "../..",
   "venv": ".venv",
   "pythonVersion": "3.12",

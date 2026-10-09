@@ -69,7 +69,7 @@ include = ["adrian*"]
 [tool.ruff]
 target-version = "py312"
 line-length = 88
-src = ["adrian"]
+src = ["adrian", "evals"]
 extend-exclude = ["adrian/proto"]
 
 [tool.ruff.lint]
