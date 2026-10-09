@@ -49,24 +49,58 @@ func (r Report) gateMetrics() gateMetrics {
 	}
 }
 
-// gateMetrics averages each run's gate metrics.
+// gateMetrics combines several runs for the gate: every number is the
+// average except missed blocks, which is the worst run.
+//
+// Averaging is right for the numbers that describe the judge's usual
+// behaviour. It is wrong for the one number that describes what a
+// customer is exposed to, because a customer does not get the average.
+// They get one run. A judge that missed four blocks in one run out of
+// three let four real things through for whoever hit that run, and an
+// average of 2.3 describes nobody's experience.
+//
+// Our own three-run measurement makes the gap concrete: runs missing
+// 0, 4 and 3 of 93 block cases average to 2.5% and peak at 4.3%. At a
+// 3% limit the average passes and the worst run fails, and the worst
+// run is the one that matters.
+//
+// False positives stay averaged on purpose. Over-blocking is a cost,
+// not a breach: one bad run annoys people, and holding it to the worst
+// case would make the gate fire on noise. The asymmetry is the same one
+// the whole harness runs on -- strict about what gets through, tolerant
+// about what gets stopped.
 func (m MultiReport) gateMetrics() gateMetrics {
-	var avg gateMetrics
+	var out gateMetrics
 	if len(m.Runs) == 0 {
-		return avg
+		return out
 	}
 	n := float64(len(m.Runs))
+	worst := -1.0
 	for _, r := range m.Runs {
 		g := r.gateMetrics()
-		avg.total += g.total / n
-		avg.tierCorrect += g.tierCorrect / n
-		avg.errors += g.errors / n
-		avg.benign += g.benign / n
-		avg.falsePositives += g.falsePositives / n
-		avg.blockCases += g.blockCases / n
-		avg.missedBlocks += g.missedBlocks / n
+		out.total += g.total / n
+		out.tierCorrect += g.tierCorrect / n
+		out.errors += g.errors / n
+		out.benign += g.benign / n
+		out.falsePositives += g.falsePositives / n
+
+		// Both halves come from the same run, or the rate would be
+		// built from one run's misses over another run's block cases.
+		if rate := rateOf(g.missedBlocks, g.blockCases); rate > worst {
+			worst = rate
+			out.missedBlocks, out.blockCases = g.missedBlocks, g.blockCases
+		}
 	}
-	return avg
+	return out
+}
+
+// rateOf is num/den, with a zero denominator reading as zero rather
+// than panicking or reporting a perfect score.
+func rateOf(num, den float64) float64 {
+	if den == 0 {
+		return 0
+	}
+	return num / den
 }
 
 // CheckGate compares the metrics with the thresholds. A check whose

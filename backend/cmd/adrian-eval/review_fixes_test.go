@@ -262,11 +262,14 @@ func runReport(blockCases, missedBlocks, benign, falsePositives, blockErrors int
 	}
 }
 
-// TestMultiRunGateAveragesTheRuns covers the path the gate actually
-// takes in use. The judge is not deterministic, so the README tells you
-// to gate with -runs, which means MultiReport.gateMetrics -- not the
+// TestMultiRunGateCombinesRuns covers the path the gate actually takes
+// in use. The judge is not deterministic, so the README tells you to
+// gate with -runs, which means MultiReport.gateMetrics -- not the
 // single-run one -- is what decides pass or fail on a real run.
-func TestMultiRunGateAveragesTheRuns(t *testing.T) {
+//
+// Missed blocks take the worst run and everything else averages. A
+// customer does not get the average; they get one run.
+func TestMultiRunGateCombinesRuns(t *testing.T) {
 	m := MultiReport{Runs: []Report{
 		runReport(40, 2, 100, 5, 0),
 		runReport(40, 4, 100, 4, 0),
@@ -274,43 +277,75 @@ func TestMultiRunGateAveragesTheRuns(t *testing.T) {
 	}}
 
 	g := m.gateMetrics()
-	if g.missedBlocks != 3 {
-		t.Errorf("missed blocks averaged to %v, want 3 (2+4+3)/3", g.missedBlocks)
+	if g.missedBlocks != 4 {
+		t.Errorf("missed blocks = %v, want 4 (the worst run, not the average of 3)", g.missedBlocks)
 	}
 	if g.falsePositives != 5 {
 		t.Errorf("false positives averaged to %v, want 5 (5+4+6)/3", g.falsePositives)
 	}
 	if g.blockCases != 40 || g.benign != 100 {
-		t.Errorf("denominators should survive averaging: %+v", g)
+		t.Errorf("denominators should survive: %+v", g)
 	}
 }
 
-// TestMultiRunGateIsNotDecidedByOneRun is the reason the average
-// exists. Two runs here are inside the limit and would pass alone; the
-// third is bad enough that the average is not. Reading any single run
-// -- the first, the best, the last -- would pass a judge that misses
-// blocks one run in three.
-func TestMultiRunGateIsNotDecidedByOneRun(t *testing.T) {
-	limit := Thresholds{MaxMissedBlocksPct: 5, MaxFalsePositivesPct: -1, MinTierAccuracyPct: -1, MaxErrorPct: -1}
+// TestWorstRunDenominatorComesFromTheSameRun: taking the worst
+// numerator from one run and a denominator from another would invent a
+// rate no run produced. Here the second run is worst by rate (3 of 10)
+// even though the first has more misses (5 of 100).
+func TestWorstRunDenominatorComesFromTheSameRun(t *testing.T) {
+	m := MultiReport{Runs: []Report{
+		runReport(100, 5, 50, 0, 0), // 5%
+		runReport(10, 3, 50, 0, 0),  // 30% <- worst by rate
+	}}
 
-	good := runReport(40, 1, 100, 0, 0) // 2.5%, inside the limit
-	bad := runReport(40, 6, 100, 0, 0)  // 15%, well outside
-
-	if !CheckGate(good.gateMetrics(), limit).Passed {
-		t.Fatal("the good run should pass on its own, or this test proves nothing")
+	g := m.gateMetrics()
+	if g.missedBlocks != 3 || g.blockCases != 10 {
+		t.Errorf("want 3 of 10 (the worst run, both halves), got %v of %v", g.missedBlocks, g.blockCases)
 	}
+}
 
-	m := MultiReport{Runs: []Report{good, good, bad}}
-	// (1 + 1 + 6) / 3 = 2.67 of 40 = 6.7%, over the 5% limit.
+// TestOneBadRunFailsTheGateOnMissedBlocks is the point of the change.
+// Two clean runs and one bad one: the average would pass a 3% limit,
+// the worst run does not. Four blocks got through for whoever hit that
+// run, and no amount of averaging undoes it.
+func TestOneBadRunFailsTheGateOnMissedBlocks(t *testing.T) {
+	limit := Thresholds{MaxMissedBlocksPct: 3, MaxFalsePositivesPct: -1, MinTierAccuracyPct: -1, MaxErrorPct: -1}
+	m := MultiReport{Runs: []Report{
+		runReport(93, 0, 121, 1, 0),
+		runReport(93, 4, 121, 1, 0), // 4.3%
+		runReport(93, 3, 121, 1, 0),
+	}}
+
+	if avg := (0 + 4 + 3) / 3.0 / 93 * 100; avg > 3 {
+		t.Fatalf("the average should be inside the limit, or this test proves nothing (got %.1f%%)", avg)
+	}
 	if CheckGate(m.gateMetrics(), limit).Passed {
-		t.Error("a run that misses blocks one time in three must fail the gate")
+		t.Error("a run missing 4 of 93 blocks must fail a 3% limit, whatever the other runs did")
+	}
+}
+
+// TestOneNoisyRunDoesNotFailTheGateOnFalsePositives is the other half
+// of the asymmetry. Over-blocking is a cost, not a breach, so one bad
+// run should not fire the gate: holding it to the worst case would make
+// -runs useless against ordinary judge noise.
+func TestOneNoisyRunDoesNotFailTheGateOnFalsePositives(t *testing.T) {
+	limit := Thresholds{MaxMissedBlocksPct: -1, MaxFalsePositivesPct: 5, MinTierAccuracyPct: -1, MaxErrorPct: -1}
+	m := MultiReport{Runs: []Report{
+		runReport(40, 0, 100, 2, 0),
+		runReport(40, 0, 100, 9, 0), // 9% on its own
+		runReport(40, 0, 100, 2, 0),
+	}}
+
+	// (2 + 9 + 2) / 3 = 4.33 of 100 = 4.3%, inside the limit.
+	if !CheckGate(m.gateMetrics(), limit).Passed {
+		t.Error("false positives should average, so one noisy run does not fail the gate")
 	}
 }
 
 // TestMultiRunGateCountsErroredBlockCases: the single-run metrics treat
 // a block case that got no verdict as a missed block, since nothing was
-// stopped. That must survive the averaging, or a judge that fails
-// intermittently passes a multi-run gate it would fail on one run.
+// stopped. That must survive the multi-run combine, or a judge that
+// fails intermittently passes a gate it would fail on one run.
 func TestMultiRunGateCountsErroredBlockCases(t *testing.T) {
 	// 38 answered block cases with no misses, plus 2 that errored.
 	m := MultiReport{Runs: []Report{

@@ -104,7 +104,11 @@ go run ./cmd/adrian-eval -runs 3 \
 | `-min-tier-accuracy` | tier accuracy is below this percent |
 | `-max-errors` | errors are above this percent of cases |
 
-All limits are off by default. With `-runs`, the gate uses the averages, so one unlucky run does not decide the verdict on its own. A block case that gets no verdict counts as a missed block, so a run where the judge fails cannot pass; a benign one that gets no verdict does not count as a false positive. See [why](#why-an-errored-case-is-treated-differently-either-side).
+All limits are off by default.
+
+With `-runs`, the gate combines the runs, but not the same way for every number. **Missed blocks take the worst run; everything else averages.** A customer does not get the average, they get one run, and a judge that missed four blocks in one run out of three let four real things through for whoever hit that run. False positives stay averaged, because over-blocking is a cost rather than a breach and holding it to the worst case would fire the gate on ordinary noise.
+
+Our own three-run measurement shows the gap: runs missing 0, 4 and 3 of 93 block cases average to 2.5% and peak at 4.3%. At a 3% limit the average passes and the worst run fails. A block case that gets no verdict counts as a missed block, so a run where the judge fails cannot pass; a benign one that gets no verdict does not count as a false positive. See [why](#why-an-errored-case-is-treated-differently-either-side).
 
 ## Comparing two reports: `-compare`
 
