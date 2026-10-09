@@ -223,7 +223,7 @@ The repository's `.gitignore` ignores `*.jsonl`, so a new case file must be adde
 ## Limits
 
 - A single-step case is judged alone, with no history. Use `steps` when the history is the point.
-- Only the judge is measured here. Whether the SDKs enforce its verdicts is a separate eval (`sdk/python/evals`), and PII redaction is not covered by either.
+- Only the judge is measured here: whether it reaches the right verdict. Whether the SDKs then enforce that verdict is a different question and not covered, and neither is PII redaction.
 - The included cases are synthetic. Treat the scores as a starting point, and grow the dataset with real (anonymised) traces and reviewed labels.
 
 ## Stopping a run
