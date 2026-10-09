@@ -21,7 +21,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/secureagentics/Adrian/backend/internal/engine"
@@ -31,15 +33,58 @@ import (
 // checkProfileNames fails loudly when a case names a profile that does
 // not exist, instead of silently judging it against the generic remit.
 func checkProfileNames(cases []Case, profiles map[string]Profile) error {
+	builtin := map[string]bool{}
+	for _, code := range engine.BaseCodes() {
+		builtin[code] = true
+	}
+
 	for _, c := range cases {
-		if c.Profile == "" {
-			continue
-		}
-		if _, ok := profiles[c.Profile]; !ok {
+		profile, ok := profiles[c.Profile]
+		if c.Profile != "" && !ok {
 			return fmt.Errorf("case %s names unknown profile %q", c.ID, c.Profile)
+		}
+		// The codes this case's judge can actually return: the static
+		// taxonomy, plus the user-defined ones its profile earns. A
+		// profile earns one code per entry, so M0.b needs two expected
+		// behaviours and M3.h two known risks.
+		//
+		// LoadCases cannot do this: it validates a case's shape before
+		// the profiles are read, so it has to accept M0.a and M3.g from
+		// anyone. Letting that stand means a label can name a code no
+		// judge can ever answer with, and the case scores wrong on every
+		// run for a reason no report explains.
+		allowed := builtin
+		if ok {
+			allowed = map[string]bool{}
+			for code := range builtin {
+				allowed[code] = true
+			}
+			for _, code := range engine.ProfileCodes(len(profile.Expected), len(profile.Risks)) {
+				allowed[code] = true
+			}
+		}
+		for _, step := range c.Unroll() {
+			for _, code := range append([]string{step.Expected}, step.AlsoOK...) {
+				if code == "" || allowed[code] {
+					continue
+				}
+				return fmt.Errorf("case %s is labelled %s, which no judge can return here: %s",
+					step.ID, code, whyUnavailable(code, c.Profile, profile, ok))
+			}
 		}
 	}
 	return nil
+}
+
+// whyUnavailable explains which part of the setup falls short, so the
+// error says what to change rather than only that something is wrong.
+func whyUnavailable(code, name string, profile Profile, hasProfile bool) string {
+	if !hasProfile {
+		return fmt.Sprintf("%s is a user-defined code and this case has no profile", code)
+	}
+	return fmt.Sprintf("profile %q defines %d expected behaviour(s) and %d known risk(s), which reach only %v",
+		name, len(profile.Expected), len(profile.Risks),
+		engine.ProfileCodes(len(profile.Expected), len(profile.Risks)))
 }
 
 func main() {
@@ -55,6 +100,7 @@ func main() {
 		workers   = flag.Int("concurrency", 4, "how many cases to judge at once")
 		retries   = flag.Int("retries", 2, "extra attempts after a network or server error (judge answers are never retried)")
 		backoff   = flag.Duration("backoff", 2*time.Second, "wait before the first retry; doubles each time")
+		timeout   = flag.Duration("timeout", engine.DefaultClassifyTimeout, "how long one judge call may take before it fails (default: production's limit)")
 		gate      = Thresholds{}
 		compare   = flag.Bool("compare", false, "compare two saved reports: adrian-eval -compare old.json new.json")
 		failRegr  = flag.Bool("fail-on-regression", false, "with -compare, exit 1 if the new report is worse")
@@ -119,7 +165,10 @@ func main() {
 
 	// Cases that name a profile are judged against that customer's remit,
 	// resolved from a temporary database through the production path.
-	// A missing profiles file is fine: those cases use the generic remit.
+	// A missing profiles file is only fine when no case names a profile:
+	// checkProfileNames below fails the run otherwise, rather than
+	// silently judging those cases against the generic remit and
+	// scoring them against labels that assume the customer's.
 	profiles, err := LoadProfiles(*profPath)
 	if err != nil && !os.IsNotExist(err) {
 		fmt.Fprintln(os.Stderr, err)
@@ -142,9 +191,21 @@ func main() {
 	}
 	opt := Options{Concurrency: *workers, Retries: *retries, Backoff: *backoff, Profiles: profStore}
 
+	// Ctrl+C stops the run but keeps what was already judged (and paid
+	// for): cases still waiting are recorded as not judged, the report
+	// is printed and saved, marked interrupted. A second Ctrl+C exits at
+	// once.
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ctx.Done()
+		stopSignals()
+		fmt.Fprintln(os.Stderr, "\ninterrupted: finishing the cases in flight, then saving; press Ctrl+C again to quit now")
+	}()
+
 	started := time.Now()
 	reps := make([]Report, 0, *runs)
-	for i := 1; i <= *runs; i++ {
+	interrupted := false
+	for i := 1; i <= *runs && !interrupted; i++ {
 		if *runs > 1 {
 			fmt.Fprintf(os.Stderr, "run %d of %d...\n", i, *runs)
 		}
@@ -158,16 +219,32 @@ func main() {
 		// there, hiding the variance -runs exists to measure.
 		window := engine.NewSlidingWindow(engine.WindowOpts{Size: 16, TTL: time.Hour})
 		judge := engine.NewHTTPClient(*url, *key, *model, window, judgeStore)
+		// The default is production's limit, so a judge too slow for
+		// production fails here too. Raise it to try a slower judge;
+		// the report records the value used.
+		if hc, ok := judge.(*engine.HTTPClient); ok && *timeout != engine.DefaultClassifyTimeout {
+			hc.SetTimeout(*timeout)
+		}
 
 		before := meter.Snapshot()
-		report := Score(RunWith(context.Background(), judge, cases, opt))
+		report := Score(RunWith(ctx, judge, cases, opt))
 		used := meter.Snapshot().Sub(before).WithCost(prices)
 		report.Usage = &used
 		reps = append(reps, report)
+		interrupted = ctx.Err() != nil
 	}
 
 	commit, dirty := gitState()
 	casesSum, _ := fileSHA256(*casesPath)
+	// Recorded only when profiles were actually read, so a report without
+	// them says so rather than carrying the hash of a file that was not
+	// there.
+	profilesFile, profilesSum := "", ""
+	if len(profiles) > 0 {
+		if sum, err := fileSHA256(*profPath); err == nil {
+			profilesFile, profilesSum = *profPath, sum
+		}
+	}
 	meta := &Meta{
 		Tool: "adrian-eval", StartedAt: started.UTC().Format(time.RFC3339),
 		DurationSec: float64(time.Since(started).Milliseconds()) / 1000,
@@ -175,8 +252,11 @@ func main() {
 		Runs: *runs, Concurrency: *workers, Retries: *retries,
 		CasesFile: *casesPath, CasesSHA256: casesSum, CaseCount: len(cases),
 		PromptSHA256: promptSHA256(*promptDir), GitCommit: commit, GitDirty: dirty,
+		ProfilesFile: profilesFile, ProfilesSHA256: profilesSum,
 		Backoff:            backoff.String(),
 		OmitSamplingParams: envTrue("ADRIAN_LLM_OMIT_SAMPLING_PARAMS"),
+		TimeoutSec:         timeout.Seconds(),
+		Interrupted:        interrupted,
 	}
 	if prices.Known() {
 		meta.Prices = &prices
@@ -206,6 +286,13 @@ func main() {
 			multi.Gate, verdict = &g, &g
 		}
 		output = multi
+	}
+	// An interrupted run never passes the gate: the cases it skipped
+	// were not judged, so its scores say nothing about the judge.
+	if verdict != nil && interrupted {
+		verdict.Passed = false
+		verdict.Checks = append(verdict.Checks, "FAIL run interrupted before every case was judged")
+		verdict.Reasons = append(verdict.Reasons, "run interrupted")
 	}
 	if verdict != nil {
 		verdict.Print(os.Stdout)
@@ -239,6 +326,9 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("\nFull report saved to %s\n", savePath)
+	}
+	if interrupted {
+		os.Exit(130)
 	}
 	if verdict != nil && !verdict.Passed {
 		os.Exit(1)

@@ -64,7 +64,13 @@ type CaseStep struct {
 	Output    string         `json:"output"`
 	Expected  string         `json:"expected"`
 	AlsoOK    []string       `json:"also_ok"`
-	Note      string         `json:"note"`
+	// Note explains this step's label. Empty means the case's note.
+	Note string `json:"note"`
+	// Tags are added to the case's tags for this step only. Put a tag
+	// that describes one step here (exfil on the step that leaks, not
+	// on the harmless step before it), so the by-tag scores count each
+	// step under what it actually is.
+	Tags []string `json:"tags"`
 }
 
 // CaseToolCall is a tool call the model wants to make (kind "llm").
@@ -97,6 +103,18 @@ func (c Case) validate() error {
 		}
 		if len(c.Steps) < 2 {
 			return fmt.Errorf("a multi-step case needs at least 2 steps")
+		}
+		// These belong on a step. At the top level they would be dropped
+		// without a word, so a case could look labelled or populated in
+		// the file while the judge and the scorer never see it.
+		for field, set := range map[string]bool{
+			"kind": c.Kind != "", "reasoning": c.Reasoning != "", "response": c.Response != "",
+			"tool_calls": len(c.ToolCalls) > 0, "tool_name": c.ToolName != "",
+			"input": c.Input != "", "output": c.Output != "", "also_ok": len(c.AlsoOK) > 0,
+		} {
+			if set {
+				return fmt.Errorf("a multi-step case has no top-level %s; put it on a step", field)
+			}
 		}
 		for i, st := range c.Steps {
 			if err := st.asCase(c, i).validate(); err != nil {
@@ -164,9 +182,14 @@ func LoadCases(r io.Reader) ([]Case, error) {
 }
 
 // asCase renders step i as a standalone Case, inheriting the parent's
-// agent prompt and user instruction. The id carries the step number so
-// each step is reported separately.
+// agent prompt, user instruction and profile, its note when the step
+// has none, and its tags (plus the step's own). The id carries the step
+// number so each step is reported separately.
 func (st CaseStep) asCase(parent Case, i int) Case {
+	note := st.Note
+	if note == "" {
+		note = parent.Note
+	}
 	return Case{
 		ID:                fmt.Sprintf("%s#%d", parent.ID, i+1),
 		Kind:              st.Kind,
@@ -181,8 +204,8 @@ func (st CaseStep) asCase(parent Case, i int) Case {
 		Output:            st.Output,
 		Expected:          st.Expected,
 		AlsoOK:            st.AlsoOK,
-		Note:              st.Note,
-		Tags:              parent.Tags,
+		Note:              note,
+		Tags:              append(append([]string{}, parent.Tags...), st.Tags...),
 	}
 }
 

@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -52,8 +54,27 @@ func RunWith(ctx context.Context, judge engine.Classifier, cases []Case, opt Opt
 			defer func() { <-slots }()
 			steps := c.Unroll()
 			out := make([]Result, 0, len(steps))
+			failed := ""
 			for _, step := range steps {
-				out = append(out, runOne(ctx, judge, step, opt))
+				// A step that failed was never written to the window, so
+				// the next step would be judged without it as history:
+				// "now send it outside" with no "I read the secret file"
+				// before it. That is a different test from the one the
+				// label describes, so the rest of the chain is skipped
+				// and recorded as errors rather than scored.
+				if failed != "" {
+					why := fmt.Errorf("skipped: earlier step %s failed, so this step would be judged without its history", failed)
+					if ctx.Err() != nil {
+						why = errNotJudged // the run was stopped, not the step
+					}
+					out = append(out, grade(step, nil, why))
+					continue
+				}
+				r := runOne(ctx, judge, step, opt)
+				if r.Error != "" {
+					failed = step.ID
+				}
+				out = append(out, r)
 			}
 			perCase[i] = out
 		}(i, c)
@@ -70,10 +91,18 @@ func RunWith(ctx context.Context, judge engine.Classifier, cases []Case, opt Opt
 // runOne judges one case, retrying network and server errors. The
 // recorded latency is that of the final attempt.
 func runOne(ctx context.Context, judge engine.Classifier, c Case, opt Options) Result {
+	// Stopped (Ctrl+C) before this case began: record that plainly
+	// instead of the "context canceled" a call would fail with.
+	if ctx.Err() != nil {
+		return grade(c, nil, errNotJudged)
+	}
 	wait := opt.Backoff
 	for attempt := 0; ; attempt++ {
 		start := time.Now()
-		v, err := judge.Classify(ctx, c.ToEvent(), opt.Profiles.IDFor(c.Profile))
+		// ctx only stops new cases and retries. A call already sent is
+		// let finish: the provider bills it either way, so cancelling
+		// it would pay for an answer and then throw it away.
+		v, err := judge.Classify(context.WithoutCancel(ctx), c.ToEvent(), opt.Profiles.IDFor(c.Profile))
 		latency := time.Since(start).Milliseconds()
 
 		if err == nil || attempt >= opt.Retries || !isTransient(err) {
@@ -91,6 +120,9 @@ func runOne(ctx context.Context, judge engine.Classifier, c Case, opt Options) R
 		wait *= 2
 	}
 }
+
+// errNotJudged marks a case the run was stopped before reaching.
+var errNotJudged = errors.New("interrupted: not judged")
 
 var serverStatus = regexp.MustCompile(`status (429|5\d\d)\b`)
 

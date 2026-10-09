@@ -29,9 +29,13 @@ type MultiReport struct {
 	AvgErrors         float64       `json:"avg_errors"`
 	Unstable          []CaseAnswers `json:"unstable"`
 	WrongEveryRun     []CaseAnswers `json:"wrong_every_run"`
-	Gate              *GateResult   `json:"gate,omitempty"`
-	Meta              *Meta         `json:"meta,omitempty"`
-	Usage             *Usage        `json:"usage,omitempty"`
+	// Errored lists cases that got no answer in at least one run. They
+	// are kept apart from Unstable: a timeout is not the judge changing
+	// its mind.
+	Errored []CaseAnswers `json:"errored,omitempty"`
+	Gate    *GateResult   `json:"gate,omitempty"`
+	Meta    *Meta         `json:"meta,omitempty"`
+	Usage   *Usage        `json:"usage,omitempty"`
 }
 
 // Summarise combines the reports of several runs over the same cases.
@@ -54,23 +58,28 @@ func Summarise(reps []Report) MultiReport {
 	// Every run covers the same cases in the same order.
 	for i, first := range reps[0].Results {
 		ca := CaseAnswers{ID: first.ID, Expected: first.Expected}
-		same, wrongAll := true, true
+		wrongAll, errored := true, false
+		seen := map[string]bool{}
 		for _, r := range reps {
 			res := r.Results[i]
 			answer := res.Got
 			if res.Error != "" {
-				answer = "ERROR"
+				answer, errored = "ERROR", true
+			} else {
+				seen[answer] = true
 			}
 			ca.Answers = append(ca.Answers, answer)
-			if answer != ca.Answers[0] {
-				same = false
-			}
 			if res.Correct {
 				wrongAll = false
 			}
 		}
-		if !same {
+		// Unstable means the judge gave different answers, so only real
+		// answers count; an error in one run is listed under Errored.
+		if len(seen) > 1 {
 			m.Unstable = append(m.Unstable, ca)
+		}
+		if errored {
+			m.Errored = append(m.Errored, ca)
 		}
 		if wrongAll {
 			m.WrongEveryRun = append(m.WrongEveryRun, ca)
@@ -116,6 +125,9 @@ func (m MultiReport) Print(w io.Writer) {
 			fmt.Fprintf(w, "  %-16s expected %-5s answers %v\n", c.ID, c.Expected, c.Answers)
 		}
 	}
-	printList("Unstable cases: the answer changed between runs", m.Unstable)
+	printList("Unstable cases: the judge gave different answers between runs", m.Unstable)
 	printList("Wrong in every run", m.WrongEveryRun)
+	if len(m.Errored) > 0 {
+		printList("Got no answer in some run (timeout, network or a reply with no M-code)", m.Errored)
+	}
 }

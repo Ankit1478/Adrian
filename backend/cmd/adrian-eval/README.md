@@ -105,6 +105,7 @@ For multi-run reports a case counts as correct when it was correct in more than 
 | `-concurrency` | 4 | Cases judged at once |
 | `-retries` | 2 | Extra attempts after a timeout, dropped connection, HTTP 429 or 5xx |
 | `-backoff` | 2s | Wait before the first retry, doubling each time |
+| `-timeout` | 30s | How long one judge call may take before it fails. The default is production's limit, so a judge too slow for production fails here too; raise it to try a slower judge |
 
 Answers from the judge are never retried, including an answer with no M-code. That is real judge behaviour and must be measured.
 
@@ -182,3 +183,7 @@ The repository's `.gitignore` ignores `*.jsonl`, so a new case file must be adde
 - Each case is judged alone: no conversation history and no agent profile from the database.
 - It tests the judge only, not whether the SDKs enforce its verdicts, and not PII redaction.
 - The included cases are synthetic. Treat the scores as a starting point, and grow the dataset with real (anonymised) traces and reviewed labels.
+
+## Stopping a run
+
+Ctrl+C stops a run without losing what it already paid for. Calls already sent are let finish, cases not yet started are recorded as `interrupted: not judged`, and the report is printed and saved with `interrupted: true`. An interrupted run always fails the gate and exits with code 130. Press Ctrl+C a second time to quit at once.

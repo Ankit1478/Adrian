@@ -34,14 +34,27 @@ type Meta struct {
 	// OmitSamplingParams records ADRIAN_LLM_OMIT_SAMPLING_PARAMS: whether
 	// temperature and stop were left out of the judge's requests.
 	OmitSamplingParams bool `json:"omit_sampling_params"`
+	// TimeoutSec is how long one judge call could take before it failed.
+	TimeoutSec float64 `json:"timeout_sec"`
+	// Interrupted is set when the run was stopped early (Ctrl+C). The
+	// cases it never judged are recorded as errors, so its scores are
+	// not comparable with a full run.
+	Interrupted bool `json:"interrupted,omitempty"`
 	// Prices are the USD per million tokens used for the cost, if given.
 	Prices       *Prices `json:"prices_usd_per_million,omitempty"`
 	CasesFile    string  `json:"cases_file"`
 	CasesSHA256  string  `json:"cases_sha256"`
 	CaseCount    int     `json:"case_count"`
 	PromptSHA256 string  `json:"prompt_sha256"`
-	GitCommit    string  `json:"git_commit"`
-	GitDirty     bool    `json:"git_dirty"`
+	// ProfilesFile and ProfilesSHA256 pin the agent profiles a run was
+	// judged against. Without them an edit to a profile changes what the
+	// profile cases are measured against while the report still looks
+	// like the same setup, and -compare blames the judge for a change
+	// made to the data. Empty when no profiles file was read.
+	ProfilesFile   string `json:"profiles_file,omitempty"`
+	ProfilesSHA256 string `json:"profiles_sha256,omitempty"`
+	GitCommit      string `json:"git_commit"`
+	GitDirty       bool   `json:"git_dirty"`
 }
 
 // cleanEndpoint keeps scheme, host and path, dropping any credentials or
@@ -96,12 +109,15 @@ func gitState() (string, bool) {
 
 // Usage is the token use reported by the model API.
 type Usage struct {
-	Calls           int64   `json:"calls"`
-	InputTokens     int64   `json:"input_tokens"`
-	CachedTokens    int64   `json:"cached_input_tokens"`
-	OutputTokens    int64   `json:"output_tokens"`
-	ReasoningTokens int64   `json:"reasoning_tokens"`
-	CostUSD         float64 `json:"cost_usd,omitempty"`
+	Calls           int64 `json:"calls"`
+	InputTokens     int64 `json:"input_tokens"`
+	CachedTokens    int64 `json:"cached_input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	ReasoningTokens int64 `json:"reasoning_tokens"`
+	// FailedCalls got no complete reply (a timeout or a network error),
+	// so their tokens are missing from the counts above.
+	FailedCalls int64   `json:"failed_calls,omitempty"`
+	CostUSD     float64 `json:"cost_usd,omitempty"`
 }
 
 // Sub returns u minus earlier, for the usage of one run.
@@ -112,6 +128,7 @@ func (u Usage) Sub(earlier Usage) Usage {
 		CachedTokens:    u.CachedTokens - earlier.CachedTokens,
 		OutputTokens:    u.OutputTokens - earlier.OutputTokens,
 		ReasoningTokens: u.ReasoningTokens - earlier.ReasoningTokens,
+		FailedCalls:     u.FailedCalls - earlier.FailedCalls,
 	}
 }
 
@@ -136,7 +153,9 @@ func envTrue(name string) bool {
 // part of the input count; they use the cached price when one is given.
 // Reasoning tokens are already included in output tokens.
 func (u Usage) WithCost(p Prices) Usage {
-	if p.Input == 0 && p.Output == 0 {
+	// Any price given is enough: a run priced by -price-cached alone
+	// still has a cost for its cached tokens.
+	if !p.Known() {
 		return u
 	}
 	cachedPrice := p.CachedInput
@@ -154,6 +173,9 @@ func (u Usage) String() string {
 	if u.CostUSD > 0 {
 		s += fmt.Sprintf(", cost $%.4f", u.CostUSD)
 	}
+	if u.FailedCalls > 0 {
+		s += fmt.Sprintf("; %d call(s) got no reply (timeout or network error) and may still be billed, so the cost is a lower bound", u.FailedCalls)
+	}
 	return s
 }
 
@@ -167,15 +189,29 @@ type usageMeter struct {
 
 func (m *usageMeter) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := m.base.RoundTrip(req)
-	if err != nil || resp.Body == nil {
+	if err != nil {
+		m.failed()
 		return resp, err
+	}
+	if resp.Body == nil {
+		return resp, nil
 	}
 	body, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	resp.Body = io.NopCloser(bytes.NewReader(body))
 	if readErr != nil {
-		return resp, nil
+		// The meter reads the reply before the judge client does, so a
+		// connection that drops mid-reply fails here first. Swallowing
+		// that and passing the truncated body on turned a retryable
+		// network error into "unmarshal: unexpected end of JSON input",
+		// which isTransient does not match: the case was recorded as a
+		// judge error instead of being retried, and on a block case the
+		// gate counted it as a missed block. A RoundTripper that errors
+		// must return a nil response, so the client sees the network
+		// error it would have seen without the meter.
+		m.failed()
+		return nil, readErr
 	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
 	var parsed struct {
 		Usage *struct {
 			PromptTokens        int64 `json:"prompt_tokens"`
@@ -200,6 +236,16 @@ func (m *usageMeter) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
+// failed counts a call that got no complete reply: a timeout or a
+// network error. Its tokens are unknown, yet the provider may still
+// bill them, so a run with failed calls has a cost that is a lower
+// bound.
+func (m *usageMeter) failed() {
+	m.mu.Lock()
+	m.total.FailedCalls++
+	m.mu.Unlock()
+}
+
 // Snapshot returns the usage counted so far.
 func (m *usageMeter) Snapshot() Usage {
 	m.mu.Lock()
@@ -217,8 +263,14 @@ func (m Meta) Print(w io.Writer) {
 	fmt.Fprintf(w, "Prompt fingerprint:    %s\n", short(m.PromptSHA256))
 	fmt.Fprintf(w, "Cases:                 %d from %s (%s)\n", m.CaseCount, m.CasesFile, short(m.CasesSHA256))
 	fmt.Fprintf(w, "Code:                  %s%s, %s, %.0fs\n", m.GitCommit, dirty, m.StartedAt, m.DurationSec)
-	fmt.Fprintf(w, "Settings:              runs %d, concurrency %d, retries %d, backoff %s, omit sampling params %v\n",
-		m.Runs, m.Concurrency, m.Retries, m.Backoff, m.OmitSamplingParams)
+	if m.ProfilesFile != "" {
+		fmt.Fprintf(w, "Profiles:              %s (%s)\n", m.ProfilesFile, short(m.ProfilesSHA256))
+	}
+	fmt.Fprintf(w, "Settings:              runs %d, concurrency %d, retries %d, backoff %s, timeout %.0fs, omit sampling params %v\n",
+		m.Runs, m.Concurrency, m.Retries, m.Backoff, m.TimeoutSec, m.OmitSamplingParams)
+	if m.Interrupted {
+		fmt.Fprintln(w, "INTERRUPTED:           stopped early; cases not judged count as errors, so do not compare this report with a full run")
+	}
 	if m.Prices != nil {
 		fmt.Fprintf(w, "Prices (USD/M tokens): input %.2f, cached input %.2f, output %.2f\n", m.Prices.Input, m.Prices.CachedInput, m.Prices.Output)
 	}
