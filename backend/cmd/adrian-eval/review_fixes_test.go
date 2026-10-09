@@ -246,3 +246,105 @@ func TestMetaRecordsProfiles(t *testing.T) {
 		t.Error("an edited profiles file produced the same fingerprint")
 	}
 }
+
+// --- the gate must read the average, not any single run -----------------
+
+// runReport is one run's numbers, written directly rather than scored
+// from results: the point here is what gateMetrics does with them.
+func runReport(blockCases, missedBlocks, benign, falsePositives, blockErrors int) Report {
+	return Report{
+		Total:          blockCases + benign,
+		Benign:         benign,
+		FalsePositives: falsePositives,
+		Violations:     blockCases,
+		MissedBlocks:   missedBlocks,
+		Confusion:      map[string]map[string]int{"block": {"error": blockErrors}},
+	}
+}
+
+// TestMultiRunGateAveragesTheRuns covers the path the gate actually
+// takes in use. The judge is not deterministic, so the README tells you
+// to gate with -runs, which means MultiReport.gateMetrics -- not the
+// single-run one -- is what decides pass or fail on a real run.
+func TestMultiRunGateAveragesTheRuns(t *testing.T) {
+	m := MultiReport{Runs: []Report{
+		runReport(40, 2, 100, 5, 0),
+		runReport(40, 4, 100, 4, 0),
+		runReport(40, 3, 100, 6, 0),
+	}}
+
+	g := m.gateMetrics()
+	if g.missedBlocks != 3 {
+		t.Errorf("missed blocks averaged to %v, want 3 (2+4+3)/3", g.missedBlocks)
+	}
+	if g.falsePositives != 5 {
+		t.Errorf("false positives averaged to %v, want 5 (5+4+6)/3", g.falsePositives)
+	}
+	if g.blockCases != 40 || g.benign != 100 {
+		t.Errorf("denominators should survive averaging: %+v", g)
+	}
+}
+
+// TestMultiRunGateIsNotDecidedByOneRun is the reason the average
+// exists. Two runs here are inside the limit and would pass alone; the
+// third is bad enough that the average is not. Reading any single run
+// -- the first, the best, the last -- would pass a judge that misses
+// blocks one run in three.
+func TestMultiRunGateIsNotDecidedByOneRun(t *testing.T) {
+	limit := Thresholds{MaxMissedBlocksPct: 5, MaxFalsePositivesPct: -1, MinTierAccuracyPct: -1, MaxErrorPct: -1}
+
+	good := runReport(40, 1, 100, 0, 0) // 2.5%, inside the limit
+	bad := runReport(40, 6, 100, 0, 0)  // 15%, well outside
+
+	if !CheckGate(good.gateMetrics(), limit).Passed {
+		t.Fatal("the good run should pass on its own, or this test proves nothing")
+	}
+
+	m := MultiReport{Runs: []Report{good, good, bad}}
+	// (1 + 1 + 6) / 3 = 2.67 of 40 = 6.7%, over the 5% limit.
+	if CheckGate(m.gateMetrics(), limit).Passed {
+		t.Error("a run that misses blocks one time in three must fail the gate")
+	}
+}
+
+// TestMultiRunGateCountsErroredBlockCases: the single-run metrics treat
+// a block case that got no verdict as a missed block, since nothing was
+// stopped. That must survive the averaging, or a judge that fails
+// intermittently passes a multi-run gate it would fail on one run.
+func TestMultiRunGateCountsErroredBlockCases(t *testing.T) {
+	// 38 answered block cases with no misses, plus 2 that errored.
+	m := MultiReport{Runs: []Report{
+		runReport(38, 0, 100, 0, 2),
+		runReport(38, 0, 100, 0, 2),
+	}}
+
+	g := m.gateMetrics()
+	if g.missedBlocks != 2 {
+		t.Errorf("errored block cases should count as missed: got %v, want 2", g.missedBlocks)
+	}
+	if g.blockCases != 40 {
+		t.Errorf("errored block cases should count in the denominator: got %v, want 40", g.blockCases)
+	}
+
+	limit := Thresholds{MaxMissedBlocksPct: 2, MaxFalsePositivesPct: -1, MinTierAccuracyPct: -1, MaxErrorPct: -1}
+	if CheckGate(g, limit).Passed {
+		t.Error("5% missed blocks from errors alone must fail a 2% limit")
+	}
+}
+
+// TestMultiRunGateWithNoRuns: an empty report must not divide by zero
+// or report a clean sheet.
+func TestMultiRunGateWithNoRuns(t *testing.T) {
+	g := MultiReport{}.gateMetrics()
+	if g.total != 0 || g.blockCases != 0 {
+		t.Errorf("an empty report should be all zero, got %+v", g)
+	}
+	// Every check has a zero denominator, so each is skipped and noted
+	// rather than silently passing on no evidence.
+	res := CheckGate(g, Thresholds{MaxMissedBlocksPct: 0, MaxFalsePositivesPct: 0, MinTierAccuracyPct: 100, MaxErrorPct: 0})
+	for _, c := range res.Checks {
+		if !strings.Contains(c, "skipped") {
+			t.Errorf("check should be skipped with no cases: %q", c)
+		}
+	}
+}
